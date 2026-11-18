@@ -133,7 +133,7 @@ test("a quote copied from the item text is unverified, and applies only when the
   const digest = "USER: Create notes.txt with three bullet ideas for a launch email\nASSISTANT: I created notes.txt and read it back."
   const p = sum.validateProposal(JSON.stringify({ summary: "Made notes.", close: [{ id: "ST-9", quote: "Create notes.txt with three bullet ideas for a launch email", why: "file created" }], add: [] }), open, digest)
   assert.equal(p.close.length, 0)
-  assert.deepEqual(p.unverified.map((u) => u.failed), ["quote copies the item text"])
+  assert.deepEqual(p.unverified.map((u) => u.failed), ["quote is the user's request, not the result"])
 })
 
 test("accepting never overwrites notes someone wrote", async () => {

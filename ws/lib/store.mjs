@@ -12,12 +12,17 @@ const parseMd = (text) => matter(text, {})
 
 // $WS_ROOT, else $XDG_DATA_HOME/ws, else ~/.local/share/ws.
 export function defaultRoot(env = process.env) {
-  if (env.WS_ROOT) return expand(env.WS_ROOT)
+  if (env.WS_ROOT) return path.resolve(expand(env.WS_ROOT))
   if (env.XDG_DATA_HOME && path.isAbsolute(env.XDG_DATA_HOME)) return path.join(env.XDG_DATA_HOME, "ws")
   return path.join(os.homedir(), ".local", "share", "ws")
 }
 
 export const ROOT = defaultRoot()
+// A relative WS_ROOT would mean a different folder for every process (hooks run in each
+// project's folder). Commands refuse to run with one; hooks do nothing.
+export const ROOT_PROBLEM = process.env.WS_ROOT && !path.isAbsolute(expand(process.env.WS_ROOT))
+  ? `WS_ROOT must be an absolute path (got "${process.env.WS_ROOT}")`
+  : null
 export const WS_DIR = path.join(ROOT, "ws")
 export const PROC_DIR = path.join(ROOT, "procedures")
 
@@ -33,6 +38,40 @@ export function tildify(p) {
 
 async function exists(p) {
   try { await fs.access(p); return true } catch { return false }
+}
+
+// Files edited on Windows have CRLF endings; every parser works on LF.
+export const normalizeEol = (text) => text.replace(/\r\n?/g, "\n")
+
+// Missing file -> null. Any other read error is real and propagates, so a damaged
+// file is never mistaken for an empty one and then overwritten.
+export async function readText(file) {
+  try { return normalizeEol(await fs.readFile(file, "utf-8")) } catch (e) {
+    if (e.code === "ENOENT") return null
+    throw e
+  }
+}
+
+// Write to a unique temp file beside the target, then rename over it. A crash or a
+// full disk leaves either the old file or the new one, never a truncated one.
+export async function writeFileAtomic(file, text) {
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
+  try {
+    await fs.writeFile(tmp, text, { flag: "wx" })
+    await fs.rename(tmp, file)
+  } catch (e) {
+    await fs.rm(tmp, { force: true }).catch(() => {})
+    throw e
+  }
+}
+
+// Record fields are one line in markdown: a newline in item or decision text would
+// otherwise create (or forge) another record.
+export const oneLine = (s) => String(s ?? "").replace(/[\r\n\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim()
+
+export const PREFIX_RE = /^[A-Z][A-Z0-9]*$/
+export function defaultPrefix(id) {
+  return id.split("-").map((w) => w.match(/[a-z]/i)?.[0] || "").join("").toUpperCase() || "WS"
 }
 
 // ---------------------------------------------------------------- workstreams
@@ -52,10 +91,8 @@ export async function listWorkstreams() {
 export async function getWorkstream(id) {
   const dir = path.join(WS_DIR, id)
   const file = path.join(dir, "WORKSTREAM.md")
-  let raw
-  try { raw = await fs.readFile(file, "utf-8") } catch {
-    throw new Error(`No workstream "${id}" (looked in ${tildify(dir)})`)
-  }
+  const raw = /^[a-z0-9][a-z0-9-]*$/.test(id) ? await readText(file) : null
+  if (raw === null) throw new Error(`No workstream "${id}" (looked in ${tildify(dir)})`)
   const { data, content } = parseMd(raw)
   const logs = await listLogs(id)
   const stat = await fs.stat(file)
@@ -73,7 +110,7 @@ export async function getWorkstream(id) {
     waiting_on: data.waiting_on || "",
     cwd: data.cwd ? expand(data.cwd) : null,
     tool: data.tool || "claude",
-    prefix: data.prefix || id.split("-").map((w) => w[0]).join("").toUpperCase(),
+    prefix: data.prefix || defaultPrefix(id),
     procedure: data.procedure || null,
     vars: data.vars || {},
     sources: (data.sources || []).map((s) => ({ ...s, path: expand(s.path) })),
@@ -89,19 +126,41 @@ export async function createWorkstream(id, fields) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) throw new Error("id must be kebab-case")
   const dir = path.join(WS_DIR, id)
   if (await exists(dir)) throw new Error(`${id} already exists`)
+  if (fields?.prefix !== undefined) {
+    fields = { ...fields, prefix: String(fields.prefix).toUpperCase() }
+    if (!PREFIX_RE.test(fields.prefix)) throw new Error("prefix must be letters and digits, starting with a letter (e.g. AB)")
+  }
+  for (const k of ["title", "waiting_on", "group"]) if (fields?.[k] !== undefined) fields = { ...fields, [k]: oneLine(fields[k]) }
   await fs.mkdir(path.join(dir, "log"), { recursive: true })
   const data = { id, status: "active", tool: "claude", created: new Date().toISOString(), sources: [], ...fields }
   for (const k of Object.keys(data)) if (data[k] === undefined) delete data[k]
-  await fs.writeFile(path.join(dir, "WORKSTREAM.md"), matter.stringify("\n", data))
+  await writeFileAtomic(path.join(dir, "WORKSTREAM.md"), matter.stringify("\n", data))
   await writeOpen(id, { next: 1, items: [] }, data.title || id)
   return getWorkstream(id)
 }
 
+// patch is an object to merge, or a function that edits `data` in place (and may
+// return a result). Runs under the workstream's lock, so concurrent updates don't
+// lose each other's fields.
 export async function updateWorkstream(id, patch) {
   const file = path.join(WS_DIR, id, "WORKSTREAM.md")
-  const { data, content } = parseMd(await fs.readFile(file, "utf-8"))
-  Object.assign(data, patch)
-  await fs.writeFile(file, matter.stringify(content, data))
+  return withLock(file, async () => {
+    const raw = await readText(file)
+    if (raw === null) throw new Error(`No workstream "${id}"`)
+    const { data, content } = parseMd(raw)
+    let result
+    if (typeof patch === "function") result = patch(data)
+    else {
+      if (patch.prefix !== undefined) {
+        patch = { ...patch, prefix: String(patch.prefix).toUpperCase() }
+        if (!PREFIX_RE.test(patch.prefix)) throw new Error("prefix must be letters and digits, starting with a letter (e.g. AB)")
+      }
+      for (const k of ["title", "waiting_on", "group"]) if (typeof patch[k] === "string") patch = { ...patch, [k]: oneLine(patch[k]) }
+      Object.assign(data, patch)
+    }
+    await writeFileAtomic(file, matter.stringify(content, data))
+    return result
+  })
 }
 
 // ------------------------------------------------- archive, delete (trash), restore
@@ -123,12 +182,11 @@ export async function unarchiveWorkstream(id) {
   const ws = await getWorkstream(id)
   if (ws.status !== "archived") throw new Error(`${id} isn't archived`)
   const to = STATUSES.includes(ws.data.archived_from) && ws.data.archived_from !== "archived" ? ws.data.archived_from : "done"
-  const file = path.join(WS_DIR, id, "WORKSTREAM.md")
-  const { data, content } = parseMd(await fs.readFile(file, "utf-8"))
-  data.status = to
-  delete data.archived_from
-  delete data.archived_at
-  await fs.writeFile(file, matter.stringify(content, data))
+  await updateWorkstream(id, (data) => {
+    data.status = to
+    delete data.archived_from
+    delete data.archived_at
+  })
   return { to }
 }
 
@@ -141,17 +199,20 @@ export async function deleteWorkstream(id) {
   // Pending drafts and queued summaries go with it, so nothing resurfaces.
   const props = path.join(ROOT, "proposals", id)
   if (await exists(props)) await fs.rename(props, path.join(dest, "proposals"))
-  const qdir = path.join(ROOT, "queue")
-  let queued = []
-  try { queued = (await fs.readdir(qdir)).filter((f) => f.endsWith(".json")) } catch {}
-  for (const f of queued) {
-    try {
-      const job = JSON.parse(await fs.readFile(path.join(qdir, f), "utf-8"))
-      if (job.ws === id) {
-        await fs.mkdir(path.join(dest, "queue"), { recursive: true })
-        await fs.rename(path.join(qdir, f), path.join(dest, "queue", f))
-      }
-    } catch {}
+  // Queued and failed summary jobs too (a running drain skips jobs whose workstream is gone).
+  for (const [from, to] of [["queue", "queue"], [path.join("queue", "failed"), "queue-failed"]]) {
+    const qdir = path.join(ROOT, from)
+    let queued = []
+    try { queued = (await fs.readdir(qdir)).filter((f) => f.endsWith(".json")) } catch {}
+    for (const f of queued) {
+      try {
+        const job = JSON.parse(await fs.readFile(path.join(qdir, f), "utf-8"))
+        if (job.ws === id) {
+          await fs.mkdir(path.join(dest, to), { recursive: true })
+          await fs.rename(path.join(qdir, f), path.join(dest, to, f))
+        }
+      } catch {}
+    }
   }
   await fs.writeFile(path.join(dest, "TRASHED.json"), JSON.stringify({ id, title: ws.title, deleted_at: new Date().toISOString() }, null, 2))
   return { trash: path.basename(dest) }
@@ -169,8 +230,21 @@ export async function listTrash() {
   return out
 }
 
+// Trash names come from the user; only exact names of existing trash entries are
+// accepted, so "..", "." or a path can never point rm/rename outside .trash.
+async function trashEntry(name) {
+  const n = String(name ?? "")
+  const names = (await listTrash()).map((t) => t.name)
+  if (!n || n.includes("/") || n.includes("\\") || n === "." || n === ".." || !names.includes(n)) {
+    throw new Error(`No trash entry "${n}" (see \`ws trash\`)`)
+  }
+  const full = path.join(TRASH_DIR, n)
+  if (path.dirname(full) !== TRASH_DIR) throw new Error(`No trash entry "${n}"`)
+  return full
+}
+
 export async function restoreWorkstream(name) {
-  const src = path.join(TRASH_DIR, path.basename(name))
+  const src = await trashEntry(name)
   if (!(await exists(path.join(src, "ws")))) throw new Error(`Nothing to restore at ${tildify(src)}`)
   const { id } = JSON.parse(await fs.readFile(path.join(src, "TRASHED.json"), "utf-8"))
   if (await exists(path.join(WS_DIR, id))) throw new Error(`A workstream "${id}" already exists; rename or delete it first`)
@@ -180,17 +254,18 @@ export async function restoreWorkstream(name) {
     await fs.mkdir(path.join(ROOT, "proposals"), { recursive: true })
     await fs.rename(path.join(src, "proposals"), path.join(ROOT, "proposals", id))
   }
-  if (await exists(path.join(src, "queue"))) {
-    await fs.mkdir(path.join(ROOT, "queue"), { recursive: true })
-    for (const f of await fs.readdir(path.join(src, "queue"))) await fs.rename(path.join(src, "queue", f), path.join(ROOT, "queue", f))
+  for (const [from, to] of [["queue", "queue"], ["queue-failed", path.join("queue", "failed")]]) {
+    if (!(await exists(path.join(src, from)))) continue
+    await fs.mkdir(path.join(ROOT, to), { recursive: true })
+    for (const f of await fs.readdir(path.join(src, from))) await fs.rename(path.join(src, from, f), path.join(ROOT, to, f))
   }
   await fs.rm(src, { recursive: true, force: true })
   return { id }
 }
 
 export async function emptyTrash(name) {
-  const targets = name ? [path.basename(name)] : (await listTrash()).map((t) => t.name)
-  for (const t of targets) await fs.rm(path.join(TRASH_DIR, t), { recursive: true, force: true })
+  const targets = name ? [await trashEntry(name)] : (await listTrash()).map((t) => path.join(TRASH_DIR, t.name))
+  for (const t of targets) await fs.rm(t, { recursive: true, force: true })
   return targets.length
 }
 
@@ -217,14 +292,17 @@ export function fillVars(text, vars) {
 // ----------------------------------------------------------------- open items
 // open.md is written only through these functions, under a lock.
 
-const ITEM_RE = /^- \[( |x)\] ([A-Z][A-Z0-9]*-\d+) (.*)$/
+// Prefixes are uppercase for new workstreams; lowercase is still read so older data survives.
+const ITEM_RE = /^- \[( |x)\] ([A-Za-z][A-Za-z0-9]*-\d+) (.*)$/
 
 export function parseOpen(text) {
+  text = normalizeEol(text)
   const next = Number(text.match(/<!-- next: (\d+) -->/)?.[1] || 0)
   const items = []
+  const unparsed = []
   for (const line of text.split("\n")) {
     const m = line.match(ITEM_RE)
-    if (!m) continue
+    if (!m) { if (/^- \[[ xX]\]/.test(line)) unparsed.push(line); continue }
     let rest = m[3]
     let waiting = null
     let closed = null
@@ -235,12 +313,12 @@ export function parseOpen(text) {
     items.push({ id: m[2], done: m[1] === "x", text: rest.trim(), waiting, closed })
   }
   const maxN = Math.max(0, ...items.map((i) => Number(i.id.split("-").pop())))
-  return { next: Math.max(next, maxN + 1), items }
+  return { next: Math.max(next, maxN + 1), items, unparsed }
 }
 
 function renderItem(i) {
-  let s = `- [${i.done ? "x" : " "}] ${i.id} ${i.text}`
-  if (i.waiting) s += ` @waiting:${i.waiting.replace(/ /g, "_")}`
+  let s = `- [${i.done ? "x" : " "}] ${i.id} ${oneLine(i.text)}`
+  if (i.waiting) s += ` @waiting:${oneLine(i.waiting).replace(/ /g, "_")}`
   if (i.closed) s += ` (closed ${i.closed})`
   return s
 }
@@ -263,18 +341,20 @@ export function renderOpen({ next, items }, title) {
 }
 
 export async function readOpen(id) {
-  try {
-    return parseOpen(await fs.readFile(path.join(WS_DIR, id, "open.md"), "utf-8"))
-  } catch {
-    return { next: 1, items: [] }
-  }
+  const file = path.join(WS_DIR, id, "open.md")
+  const text = await readText(file)
+  if (text === null) return { next: 1, items: [], unparsed: [] }
+  const state = parseOpen(text)
+  // Refuse rather than rewrite: writing back would drop the lines we couldn't read.
+  if (state.unparsed.length) throw new Error(`${tildify(file)} has item lines ws can't read; fix them by hand:\n  ${state.unparsed.slice(0, 3).join("\n  ")}`)
+  return state
 }
 
 async function writeOpen(id, state, title) {
-  await fs.writeFile(path.join(WS_DIR, id, "open.md"), renderOpen(state, title))
+  await writeFileAtomic(path.join(WS_DIR, id, "open.md"), renderOpen(state, title))
 }
 
-async function withLock(file, fn) {
+export async function withLock(file, fn) {
   const lock = file + ".lock"
   const start = Date.now()
   for (;;) {
@@ -308,14 +388,15 @@ async function mutateOpen(id, fn) {
 // mid-edit by a live session, so it is left alone until the next sync.
 
 export const MIRROR_QUIET_MS = 2 * 60_000
-const mirrorStart = (id) => `<!-- ws:open ${id}`
+// The ":" after the id is part of the marker, so "a" never matches the block for "ab".
+const mirrorStart = (id) => `<!-- ws:open ${id}:`
 const MIRROR_END = "<!-- /ws:open -->"
 
 export async function renderMirror(id) {
   const { items } = await readOpen(id)
   const open = items.filter((i) => !i.done)
   return [
-    `${mirrorStart(id)}: generated by ws. Change items with \`ws item\`, not here. -->`,
+    `${mirrorStart(id)} generated by ws. Change items with \`ws item\`, not here. -->`,
     `_Open items (ws, updated ${today()}):_`,
     "",
     ...(open.length ? open.map((i) => `- ${i.id} ${i.text}${i.waiting ? ` (waiting on ${i.waiting})` : ""}`) : ["- (none)"]),
@@ -323,10 +404,15 @@ export async function renderMirror(id) {
   ].join("\n")
 }
 
-export async function syncMirror(id, { force = false, init = false } = {}) {
+export async function syncMirror(id, opts = {}) {
   const ws = await getWorkstream(id)
   if (!ws.data.mirror) return { action: "none" }
   const file = expand(ws.data.mirror)
+  // Several workstreams can mirror into one doc: serialize writes to it.
+  return withLock(file + ".ws", () => syncMirrorUnlocked(id, file, opts))
+}
+
+async function syncMirrorUnlocked(id, file, { force = false, init = false } = {}) {
   const stat = await fs.stat(file)
   if (!force && Date.now() - stat.mtimeMs < MIRROR_QUIET_MS) return { action: "deferred", file }
   const text = await fs.readFile(file, "utf-8")
@@ -340,15 +426,15 @@ export async function syncMirror(id, { force = false, init = false } = {}) {
   if (next === text) return { action: "unchanged", file }
   // Re-check right before writing: bail if the doc changed while we rendered.
   if ((await fs.stat(file)).mtimeMs !== stat.mtimeMs) return { action: "deferred", file }
-  const tmp = `${file}.ws-tmp`
-  await fs.writeFile(tmp, next)
-  await fs.rename(tmp, file)
+  await writeFileAtomic(file, next)
   return { action: "written", file }
 }
 
 export function addItem(id, text, { waiting } = {}) {
   return mutateOpen(id, (state, ws) => {
-    const item = { id: `${ws.prefix}-${state.next}`, done: false, text, waiting: waiting || null, closed: null }
+    text = oneLine(text)
+    if (!text) throw new Error("item text is empty")
+    const item = { id: `${ws.prefix}-${state.next}`, done: false, text, waiting: waiting ? oneLine(waiting) : null, closed: null }
     state.next += 1
     state.items.push(item)
     return item
@@ -361,7 +447,7 @@ export function closeItem(id, itemId, { session, note } = {}) {
     if (!item) throw new Error(`${itemId} not found in ${id}`)
     if (item.done) throw new Error(`${itemId} is already closed`)
     item.done = true
-    item.closed = [today(), session && session.slice(0, 8), note].filter(Boolean).join(", ")
+    item.closed = [today(), session && oneLine(session).slice(0, 8), note && oneLine(note).replace(/[()]/g, "")].filter(Boolean).join(", ")
     return item
   })
 }
@@ -370,8 +456,8 @@ export function editItem(id, itemId, { text, waiting }) {
   return mutateOpen(id, (state) => {
     const item = state.items.find((i) => i.id.toUpperCase() === itemId.toUpperCase())
     if (!item) throw new Error(`${itemId} not found in ${id}`)
-    if (text) item.text = text
-    if (waiting !== undefined) item.waiting = waiting || null
+    if (text && oneLine(text)) item.text = oneLine(text)
+    if (waiting !== undefined) item.waiting = waiting ? oneLine(waiting) : null
     return item
   })
 }
@@ -379,21 +465,24 @@ export function editItem(id, itemId, { text, waiting }) {
 // ------------------------------------------------------------------ decisions
 // decisions.md: settled choices with why and what was rejected, so sessions don't
 // reopen them. Superseded, never edited in place; IDs are <PREFIX>-D<n>.
-//   - [active] AB-D1 Cream is #F2F2E9 everywhere (2026-11-17)
+//   - [active] AB-D1 Brand blue is #1A4FD6 everywhere (2026-11-17)
 //     why: the guide palette is the source of truth
-//     rejected: #F7F7E7 (only in old logo exports)
+//     rejected: #2B5FE0 (only in old logo exports)
 //     evidence: "…"
 //   - [superseded by AB-D3] AB-D2 …
 
-const DEC_RE = /^- \[(active|superseded(?: by ([A-Z][A-Z0-9]*-D\d+))?)\] ([A-Z][A-Z0-9]*-D\d+) (.*?)(?: \((\d{4}-\d{2}-\d{2})\))?$/
+const DEC_RE = /^- \[(active|superseded(?: by ([A-Za-z][A-Za-z0-9]*-D\d+))?)\] ([A-Za-z][A-Za-z0-9]*-D\d+) (.*?)(?: \((\d{4}-\d{2}-\d{2})\))?$/
 const DEC_FIELDS = ["why", "rejected", "evidence", "session"]
 
 export function parseDecisions(text) {
+  text = normalizeEol(text)
   const next = Number(text.match(/<!-- next: (\d+) -->/)?.[1] || 0)
   const decisions = []
+  const unparsed = []
   let cur = null
   for (const line of text.split("\n")) {
     const m = line.match(DEC_RE)
+    if (!m && /^- \[(active|superseded)/.test(line)) { unparsed.push(line); cur = null; continue }
     if (m) {
       cur = { id: m[3], text: m[4].trim(), date: m[5] || null, active: m[1] === "active", superseded_by: m[2] || null }
       decisions.push(cur)
@@ -403,13 +492,13 @@ export function parseDecisions(text) {
     if (cur && f && DEC_FIELDS.includes(f[1])) cur[f[1]] = f[2].trim()
   }
   const maxN = Math.max(0, ...decisions.map((d) => Number(d.id.split("-D").pop())))
-  return { next: Math.max(next, maxN + 1), decisions }
+  return { next: Math.max(next, maxN + 1), decisions, unparsed }
 }
 
 export function renderDecisions({ next, decisions }, title) {
   const one = (d) => [
-    `- [${d.active ? "active" : `superseded${d.superseded_by ? ` by ${d.superseded_by}` : ""}`}] ${d.id} ${d.text}${d.date ? ` (${d.date})` : ""}`,
-    ...DEC_FIELDS.filter((k) => d[k]).map((k) => `  ${k}: ${String(d[k]).replace(/\n/g, " ")}`),
+    `- [${d.active ? "active" : `superseded${d.superseded_by ? ` by ${d.superseded_by}` : ""}`}] ${d.id} ${oneLine(d.text)}${d.date ? ` (${d.date})` : ""}`,
+    ...DEC_FIELDS.filter((k) => d[k]).map((k) => `  ${k}: ${oneLine(d[k])}`),
   ].join("\n")
   const active = decisions.filter((d) => d.active)
   const old = decisions.filter((d) => !d.active)
@@ -428,11 +517,12 @@ export function renderDecisions({ next, decisions }, title) {
 }
 
 export async function readDecisions(id) {
-  try {
-    return parseDecisions(await fs.readFile(path.join(WS_DIR, id, "decisions.md"), "utf-8"))
-  } catch {
-    return { next: 1, decisions: [] }
-  }
+  const file = path.join(WS_DIR, id, "decisions.md")
+  const text = await readText(file)
+  if (text === null) return { next: 1, decisions: [], unparsed: [] }
+  const state = parseDecisions(text)
+  if (state.unparsed.length) throw new Error(`${tildify(file)} has decision lines ws can't read; fix them by hand:\n  ${state.unparsed.slice(0, 3).join("\n  ")}`)
+  return state
 }
 
 export async function decide(id, text, { why, rejected, evidence, session, supersedes } = {}) {
@@ -446,20 +536,22 @@ export async function decide(id, text, { why, rejected, evidence, session, super
       if (!old) throw new Error(`${supersedes} not found in ${id}`)
       if (!old.active) throw new Error(`${supersedes} is already superseded`)
     }
-    const d = { id: `${ws.prefix}-D${state.next}`, text: String(text).trim(), date: today(), active: true, superseded_by: null,
-      why: why || undefined, rejected: Array.isArray(rejected) ? rejected.join("; ") : rejected || undefined, evidence: evidence || undefined, session: session || undefined }
+    const opt = (v) => (v ? oneLine(v) || undefined : undefined)
+    const d = { id: `${ws.prefix}-D${state.next}`, text: oneLine(text), date: today(), active: true, superseded_by: null,
+      why: opt(why), rejected: opt(Array.isArray(rejected) ? rejected.join("; ") : rejected), evidence: opt(evidence), session: opt(session) }
     if (!d.text) throw new Error("decision text is empty")
     state.next += 1
     state.decisions.push(d)
     if (old) { old.active = false; old.superseded_by = d.id }
-    await fs.writeFile(file, renderDecisions(state, ws.title))
+    await writeFileAtomic(file, renderDecisions(state, ws.title))
     return { decision: d, superseded: old?.id || null }
   })
   return result
 }
 
 // ----------------------------------------------------------------------- logs
-// One file per session, never rewritten.
+// One file per session. A log is filled in place when its session is adopted, resumed
+// or summarized; other sessions never touch it.
 
 export async function listLogs(id) {
   const dir = path.join(WS_DIR, id, "log")
@@ -468,7 +560,7 @@ export async function listLogs(id) {
   const logs = []
   for (const f of files.filter((f) => f.endsWith(".md")).sort()) {
     const file = path.join(dir, f)
-    const { data, content } = parseMd(await fs.readFile(file, "utf-8"))
+    const { data, content } = parseMd(normalizeEol(await fs.readFile(file, "utf-8")))
     const { mtimeMs } = await fs.stat(file)
     logs.push({ file, ...data, summary: content.trim(), mtimeMs })
   }

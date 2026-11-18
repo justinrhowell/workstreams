@@ -1,2 +1,6 @@
-# Auto detect text files and perform LF normalization
+# Normalize text files to LF in the repo.
 * text=auto
+# Scripts run through a shebang must have LF endings, even when checked out on Windows.
+*.mjs text eol=lf
+*.js text eol=lf
+*.sh text eol=lf

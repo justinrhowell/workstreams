@@ -41,11 +41,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Reported, not enforced: the current findings are transitive through
-      # Next 14 and clear with a Next upgrade.
-      - name: Run npm audit (board)
+      # Enforced for everything that ships at runtime. Build-only tools (Tailwind,
+      # ESLint, Jest) are excluded with --omit=dev: they never run inside the board.
+      - name: Run npm audit (board, runtime)
         run: npm audit --omit=dev
-        continue-on-error: true
 
       - name: Run npm audit (ws)
         run: npm --prefix ws ci && npm --prefix ws audit --omit=dev

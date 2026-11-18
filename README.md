@@ -13,7 +13,7 @@ From those it builds a fresh resume prompt whenever you start a session. Everyth
 
 ## Quick start
 
-Requires Node 20+, and Claude Code and/or Codex.
+Requires Node 20.9+ on the PATH that Claude Code and Codex see (hooks run `ws` through `#!/usr/bin/env node`), and Claude Code and/or Codex.
 
 ```bash
 git clone https://github.com/justinrhowell/workstreams.git && cd workstreams
@@ -21,7 +21,7 @@ npm --prefix ws ci
 node ws/bin/ws.mjs setup        # data folder, `ws` on PATH, hooks + MCP for Claude Code and Codex
 ```
 
-`ws setup` is safe to re-run. It backs up any settings file it changes (`*.bak-ws`) and leaves your other hooks alone. Use `--dry-run` to see what it would do, or `--claude` / `--codex` to set up only one tool. Codex asks you to approve new hooks once: run `/hooks` in Codex.
+`ws setup` is safe to re-run: it only adds, updates or de-duplicates hook entries that are entirely ws's, keeps a timestamped backup of any settings file it changes, and updates the MCP registration if the repo or data folder moved. Custom hooks, including ones that call ws inside a larger command, are left alone. Use `--dry-run` to see what it would do, `--claude` / `--codex` to set up one tool, and `ws setup --uninstall` to remove everything it added (your data stays). Codex asks you to approve new hooks once: run `/hooks` in Codex. It honours `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
 
 Then create a workstream for a project folder and start working:
 
@@ -40,7 +40,7 @@ npm ci                # once, from the repo root
 ws board              # http://127.0.0.1:3311
 ```
 
-A local web view of every workstream: columns by status, staleness, the inbox, summarizer proposals, and per-workstream detail. It binds to 127.0.0.1 and refuses cross-origin writes. On macOS, `ws board --install` keeps it running in the background.
+A local web view of every workstream: columns by status, staleness, the inbox, summarizer proposals, and per-workstream detail. It binds to 127.0.0.1, has no login, and refuses cross-origin and proxied requests, so keep it local: never expose it through a tunnel or proxy. On macOS, `ws board --install` keeps it running in the background.
 
 ## Parts
 
@@ -49,7 +49,7 @@ A local web view of every workstream: columns by status, staleness, the inbox, s
 | CLI | `ws/bin/ws.mjs` | `setup`, `new`, `go`, `prompt`, `item`, `decide`, `log`, `inbox`, `review`, `stale`, `doctor`, `board`, … (`ws help`) |
 | Hooks | `ws hook claude\|codex start\|end` | Start: tell the session what's open. End: log it, or put it in the inbox |
 | MCP server | `ws/mcp/server.mjs` | `ws_list`, `ws_show`, `ws_compose`, `ws_item_*`, `ws_decide`, `ws_log`, `ws_set_status`, `ws_inbox` |
-| Summarizer | `ws/lib/summarize.mjs` | Optional. Drafts notes for sessions that ended without any, using any OpenAI-compatible model. Nothing applies until you accept it |
+| Summarizer | `ws/lib/summarize.mjs` | Optional. Drafts notes for sessions that ended without any, using an OpenAI-compatible chat model (self-hosted, or hosted with `llm.model` and an API key). Nothing applies until you accept it |
 | Board | Next.js app in this folder | Local web view (above) |
 
 ## Configuration
@@ -58,7 +58,7 @@ Your data lives in `$WS_ROOT`, which defaults to `$XDG_DATA_HOME/ws` or `~/.loca
 
 ## Platforms
 
-macOS and Linux. The background board service (`ws board --install`) is macOS-only for now. Windows is untested; WSL should work like Linux.
+macOS and Linux (CI runs the ws suite on both). The background board service (`ws board --install`) is macOS-only for now. Native Windows isn't supported (hooks and paths assume a POSIX shell); use WSL.
 
 ## More
 

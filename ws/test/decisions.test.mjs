@@ -16,28 +16,28 @@ const site = path.join(tmp, "site")
 before(async () => {
   await fs.mkdir(site, { recursive: true })
   await store.createWorkstream("brand", { title: "Brand refresh", cwd: site, prefix: "BR" })
-  await store.addItem("brand", "Pick the cream colour")
+  await store.addItem("brand", "Pick the brand blue")
 })
 
 test("decide allocates <PREFIX>-D<n>, records why/rejected, and supersedes without editing", async () => {
-  const a = await store.decide("brand", "Cream is #F7F7E7", { why: "matches logo exports" })
+  const a = await store.decide("brand", "Brand blue is #2B5FE0", { why: "matches logo exports" })
   assert.equal(a.decision.id, "BR-D1")
-  const b = await store.decide("brand", "Cream is #F2F2E9 everywhere", { why: "guide palette is the source", rejected: ["#F7F7E7: legacy export value"], supersedes: "br-d1" })
+  const b = await store.decide("brand", "Brand blue is #1A4FD6 everywhere", { why: "guide palette is the source", rejected: ["#2B5FE0: legacy export value"], supersedes: "br-d1" })
   assert.equal(b.decision.id, "BR-D2")
   assert.equal(b.superseded, "BR-D1")
   const { decisions } = await store.readDecisions("brand")
   const d1 = decisions.find((d) => d.id === "BR-D1")
   assert.equal(d1.active, false)
   assert.equal(d1.superseded_by, "BR-D2")
-  assert.equal(d1.text, "Cream is #F7F7E7") // unchanged
-  assert.equal(decisions.find((d) => d.id === "BR-D2").rejected, "#F7F7E7: legacy export value")
+  assert.equal(d1.text, "Brand blue is #2B5FE0") // unchanged
+  assert.equal(decisions.find((d) => d.id === "BR-D2").rejected, "#2B5FE0: legacy export value")
   await assert.rejects(store.decide("brand", "x", { supersedes: "BR-D1" }), /already superseded/)
   await assert.rejects(store.decide("brand", "x", { supersedes: "BR-D9" }), /not found/)
 })
 
 test("prompt and start note list active decisions only", async () => {
   const { text } = await compose("brand")
-  assert.match(text, /Decided \(don't reopen[\s\S]*BR-D2 Cream is #F2F2E9 everywhere\. Why: guide palette is the source\. Rejected: #F7F7E7/)
+  assert.match(text, /Decided \(don't reopen[\s\S]*BR-D2 Brand blue is #1A4FD6 everywhere\. Why: guide palette is the source\. Rejected: #2B5FE0/)
   assert.doesNotMatch(text, /BR-D1/)
   assert.match(text, /ws decide brand/)
   const note = await cap.startContext({ cwd: site })
@@ -53,13 +53,13 @@ test("decision IDs never collide with item IDs, and parallel decides don't lose 
 })
 
 test("summarizer: decisions need a real quote; restated decisions are dropped; unverified ones need confirming", async () => {
-  const decided = [{ id: "BR-D2", text: "Cream is #F2F2E9 everywhere" }]
+  const decided = [{ id: "BR-D2", text: "Brand blue is #1A4FD6 everywhere" }]
   const digest = "USER: let's go with Helvetica Neue for all headings, no more Inter.\nASSISTANT: Done."
   const p = sum.validateProposal(JSON.stringify({
     summary: "Chose fonts.",
     decide: [
       { text: "Use Helvetica Neue for all headings", why: "house style", rejected: ["Inter"], quote: "let's go with Helvetica Neue for all headings" },
-      { text: "Cream is #F2F2E9 everywhere", quote: "let's go with Helvetica Neue for all headings" }, // restates an active decision
+      { text: "Brand blue is #1A4FD6 everywhere", quote: "let's go with Helvetica Neue for all headings" }, // restates an active decision
       { text: "Use 12pt body text", quote: "nobody said this in the session at all" },
     ],
   }), [], digest, decided)

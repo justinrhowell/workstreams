@@ -5,7 +5,6 @@ const nextConfig = {
   // The background service builds and serves from .next-prod, so a dev server
   // (which uses .next) can never overwrite the build it is serving.
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  eslint: { ignoreDuringBuilds: false },
   typescript: { ignoreBuildErrors: false },
   async headers() {
     return [

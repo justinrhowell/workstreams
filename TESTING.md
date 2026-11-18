@@ -12,7 +12,8 @@ Notable suites:
 
 - `state-correctness.test.mjs`: closed items and superseded decisions never show as current in any surface (resume prompts, start notes, mirror block, MCP, summarizer input).
 - `capture.test.mjs`: how ended sessions are linked, skipped or sent to the inbox.
-- `setup.test.mjs`: `ws setup` merges hooks without disturbing other settings, and a second run changes nothing.
+- `setup.test.mjs`: `ws setup` merges hooks without disturbing other settings, leaves compound hooks alone, reconciles MCP and the CLI link, uninstalls cleanly, and only ever calls the `claude`/`codex` on the env it's given (stub CLIs in tests).
+- `hardening.test.mjs`: trash containment, CRLF files, prefix and newline validation, refusing damaged files, concurrent updates, double-accept, secret redaction, config validation, provider errors, verification rules, eval failure accounting, mirror markers.
 
 ## Summarizer quality
 
@@ -25,7 +26,7 @@ Scores the summarizer against your own sessions with known correct answers (`$WS
 ## Board
 
 ```bash
-npm test               # Jest, Node environment: route guards
+npm test               # Jest, Node environment: route guards for reads and writes
 npm run lint && npm run type-check && npm run build
 ```
 

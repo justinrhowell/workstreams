@@ -7,7 +7,7 @@ Everything that is yours (workstreams, logs, settings, eval cases) lives in the 
 | | |
 |---|---|
 | Default | `$XDG_DATA_HOME/ws` if `XDG_DATA_HOME` is set, else `~/.local/share/ws` |
-| Override | `WS_ROOT=/path/to/folder` |
+| Override | `WS_ROOT=/absolute/path` (a relative path is refused: hooks run in each project's folder, so it would mean a different folder every time) |
 
 Hooks and the MCP server don't read your shell profile. If you set `WS_ROOT`, run `ws setup` with it set, and setup will pin it into the hook commands and MCP registrations. The background board service always pins the folder it was installed with. Another option is to leave `WS_ROOT` unset and symlink `~/.local/share/ws` to the folder you want.
 
@@ -39,11 +39,21 @@ To keep the data in a synced or backed-up folder, point `WS_ROOT` there or symli
 | `llm.model` | Model ID. If omitted, ws uses the first model listed at `/models`. |
 | `llm.apiKeyEnv` | Name of the environment variable that holds the API key. The key itself never goes in this file. |
 | `llm.timeoutMs` | Per-request timeout. Default 180000. |
-| `llm.extraBody` | Extra fields merged into each chat-completions request, for server-specific options. The example turns thinking off on vLLM-served Qwen models. |
+| `llm.extraBody` | Extra fields merged into each chat-completions request, for server-specific options. The example turns thinking off on vLLM-served Qwen models. `null` removes a default field; `model` and `messages` can't be set. |
 | `board.port` | Port for `ws board` and the background service. Default 3311. |
 | `board.label` | launchd label for the background service (macOS). Default `ws.board`. Uninstall the service before changing it. |
 
-**Privacy:** the summarizer sends a digest of each un-noted session (your prompts, the assistant's text and tool names, but not tool output) to `llm.url`. With a local model, nothing leaves your machine. With a hosted API, that digest goes to the provider.
+**Privacy:** for each session that ended without notes, the summarizer sends `llm.url`:
+
+- your prompts and the assistant's replies (clipped),
+- each tool call's name and the first 140 characters of its main argument: shell commands, file paths, URLs, search patterns,
+- the workstream's title, open items and active decisions.
+
+Tool output is never sent. Common credential shapes (API keys, GitHub and Slack tokens, AWS keys, JWTs, `Bearer …`, `password=…`, `user:pass@` in URLs, private keys) are replaced with `[redacted]` before sending. That is a safety net, not a guarantee: a secret in an unusual format can still get through. With a self-hosted model nothing leaves your machine. With a hosted API, this digest goes to the provider. Leave `llm.url` unset to keep the summarizer off.
+
+**Validation:** ws checks every value. A wrong type or an unsafe value is ignored, and commands print a one-line `config.json:` note saying what was ignored. A broken file never stops hooks.
+
+**Hosted providers:** set `llm.model` (when `/models` lists more than one model on a non-local host, ws won't guess) and `llm.apiKeyEnv`. A refused key or a wrong URL keeps the job queued and says so (`ws summarize --drain`), instead of spending the job's retries. If your provider wants `max_completion_tokens`, use `"extraBody": {"max_tokens": null, "max_completion_tokens": 1500}`: `null` removes a default field. `extraBody` can't change the model or the messages.
 
 ## Environment variables
 
@@ -58,6 +68,9 @@ To keep the data in a synced or backed-up folder, point `WS_ROOT` there or symli
 | `WS_ID` | folder matching | Set by `ws go`. Forces a session onto that workstream |
 | `WS_DEBUG` | | Hooks print what they decided to stderr |
 | `WS_NO_SPAWN` | | Hooks don't start the background summarizer (used in tests) |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Where Claude Code's settings and transcripts are; `ws setup` writes hooks there |
+| `CODEX_HOME` | `~/.codex` | Same for Codex |
+| `VISUAL`, `EDITOR` | | Editor for `ws go` (`VISUAL` first, then `EDITOR`, then `nano`); run through `sh`, so arguments and quoted paths work |
 
 The summarizer runs as a detached process started by the hooks, so its API key variable must be visible to Claude Code or Codex, not just to your terminal.
 
@@ -96,6 +109,15 @@ sources:                  # read-first docs for the resume prompt
 ```
 
 `ws doctor <id>` checks that every path and section resolves. `ws prompt` refuses to build a prompt from a broken pointer rather than silently drop it.
+
+## Uninstalling
+
+```bash
+ws setup --uninstall            # add --dry-run to preview
+ws board --uninstall            # macOS, if you installed the background service
+```
+
+This removes ws's own hook entries (custom hooks are kept), the `ws` MCP registrations, and the `~/.local/bin/ws` link. Each settings file it changes is backed up first. Your data folder is left alone; delete it yourself if you want it gone.
 
 ## Setting up hooks by hand
 

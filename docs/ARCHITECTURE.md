@@ -10,7 +10,7 @@ The same "what's still open" list tends to drift across memory notes, status doc
 |---|---|
 | Open items (what's left, who it's waiting on) | `open.md` in the workstream, with stable IDs |
 | Decisions (what was settled, why, what was rejected) | `decisions.md`, IDs like `AB-D2`, superseded rather than edited |
-| What each session did | `log/`, one file per session, append-only |
+| What each session did | `log/`, one file per session (filled in when the session is adopted, resumed or summarized; never shared between sessions) |
 | How this kind of work is done | `procedures/*.md`, with `{{vars}}` |
 | Narrative and decisions | The project's own status doc, which ws points to |
 | Rules about people and process | Claude memory notes, which ws points to (and inlines for Codex) |
@@ -46,6 +46,11 @@ graph LR
 
 All writers go through `ws/lib`. That way item IDs are allocated once, the `open.md` lock is always taken, and the opt-in mirror block stays in sync.
 
+- **Writes are atomic:** every file is written to a temp file and renamed into place, so a crash leaves the old version or the new one, never half a file.
+- **Damage is refused, not overwritten:** a missing `open.md` is empty, but an unreadable one, or one with item lines ws can't parse, stops the command with an error instead of being rewritten without them.
+- **Record text is one line:** newlines in item and decision text are collapsed, so text can't forge another record. Line endings are normalized, so files edited on Windows still parse.
+- **Locks:** `open.md`, `decisions.md` and `WORKSTREAM.md` changes, session-log adoption and the summary drain each take a lock.
+
 - **`store.mjs`** handles workstreams, open items (lock, IDs that are never reused), logs, the mirror block, and staleness. Staleness counts from the newest session end, not from file edits.
 - **`compose.mjs`** builds the resume prompt: read-first sources, the input slot, the procedure, open items, the last real session summary, and recent sessions without notes. It inlines Claude memory notes when the target is Codex, and fails loudly when a path or section doesn't resolve.
 - **`capture.mjs`** runs from the hooks.
@@ -53,8 +58,8 @@ All writers go through `ws/lib`. That way item IDs are allocated once, the `open
   - **Filtering:** tiny sessions (one prompt, few tool calls, no edits, no ws calls) are skipped. A `ws log` written during the session is adopted rather than duplicated.
   - **Start note:** returned as `hookSpecificOutput.additionalContext`, and it defers to the user.
 - **`summarize.mjs`** drafts proposals for sessions that ended without notes. The hook only enqueues; a detached `ws summarize --drain` does the work.
-  - **Model input:** a digest of the session (prompts, assistant text, tool names; no tool output), sent in JSON mode. Server-specific fields (for example turning thinking off on vLLM) come from `llm.extraBody` in config. The reply must finish with `stop`.
-  - **Validation:** a close must quote the session verbatim, must not copy the item text, and must share words with the item. Closes that fail become *unverified* suggestions, off by default. New items that restate open ones are dropped.
+  - **Model input:** a digest of the session (your prompts, assistant text, tool names with the first 140 characters of each tool's main argument; no tool output), with common credential shapes redacted first, sent in JSON mode. Server-specific fields (for example turning thinking off on vLLM) come from `llm.extraBody` in config. The reply must finish with `stop`.
+  - **Validation:** a close must quote an assistant or tool line verbatim (never the user's request), must not copy the item text, and must share words with the item. A decision must quote the user. Anything that fails becomes an *unverified* suggestion, off by default. New items that restate open ones are dropped. Accepting claims the proposal first, so it can't be applied twice.
   - **Failures:** endpoint outages never use up a job's attempts.
   - **Review:** proposals apply only through `ws review accept` or the board. Accepting never overwrites notes someone wrote.
 
@@ -65,7 +70,7 @@ All writers go through `ws/lib`. That way item IDs are allocated once, the `open
 
 ## Recall
 
-- `ws go <id>` opens the composed prompt in `$EDITOR` with the cursor on the input slot. On save it launches `claude -n "<title>"` or `codex` in the workstream's cwd with `WS_ID` set. `--resume` reuses a session from the last 12 hours.
+- `ws go <id>` opens the composed prompt in `$VISUAL`, else `$EDITOR`, else `nano` (run through `sh`, so `code --wait` works), with the cursor on the input slot. On save it launches `claude -n "<title>"` or `codex` in the workstream's cwd with `WS_ID` set. `--resume` reuses a session from the last 12 hours.
 - `ws prompt <id>` copies the prompt for desktop or web apps.
 - The MCP tools (`ws_show`, `ws_compose`, `ws_item_*`, `ws_log`, …) give both CLIs a native way to read and write.
 - A "park" or handoff skill in your agent setup can call the same MCP tools to record what a session changed before you switch away.
@@ -74,7 +79,7 @@ All writers go through `ws/lib`. That way item IDs are allocated once, the `open
 
 The board is the Next app at `/`. Its API routes import `ws/lib` directly.
 
-- **Network:** it binds to `127.0.0.1`. Writes need JSON, a local `Host` and a same-origin `Origin`, so other sites can't post to it and DNS rebinding is blocked.
+- **Security boundary:** the board is for this machine only and has no login. It binds to `127.0.0.1`. Every API request, read or write, needs a local `Host`, a same-origin `Origin` if one is sent, and no proxy headers; writes also need JSON. That blocks cross-site requests and DNS rebinding from web pages. It does not authenticate a local process, so never expose the board through a proxy, tunnel or `0.0.0.0`.
 
 ## Platforms
 

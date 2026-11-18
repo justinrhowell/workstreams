@@ -9,7 +9,10 @@ import { api, type Proposal } from "./api"
 export function ReviewList({ onChange, onOpen }: { onChange: () => void; onOpen: (id: string) => void }) {
   const [rows, setRows] = useState<Proposal[] | null>(null)
   const load = useCallback(async () => setRows(await api.review().catch(() => [])), [])
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    const t = setTimeout(load, 0) // fetch after mount, outside the effect body
+    return () => clearTimeout(t)
+  }, [load])
 
   if (!rows) return <p className="text-sm text-muted-foreground">Loading…</p>
   if (!rows.length) {

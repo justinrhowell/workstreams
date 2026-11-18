@@ -215,3 +215,38 @@ test("E2E: a workstream named through a symlinked folder claims sessions reporte
   assert.equal(cap.matchWorkstream(list, path.join(link, "sub"), null).link, "via-link")
   await store.updateWorkstream("via-link", { status: "done" })
 })
+
+// ------------------------------------------------------------ e2e follow-ups
+
+const write = async (name, ...rows) => { const p = path.join(tmp, `${name}.jsonl`); await fs.writeFile(p, jl(...rows)); return p }
+
+test("scripted runs (codex exec, claude -p) outside any workstream folder skip the inbox", async () => {
+  const nowhere = await mkTmp("ws-nowhere-") // not on the ignore list an earlier test writes
+  const tools = Array.from({ length: 6 }, () => ({ type: "response_item", payload: { type: "function_call", name: "shell", arguments: "ls" } }))
+  const exec = await write("exec1", { type: "session_meta", payload: { originator: "codex_exec", source: "exec", cwd: nowhere } }, ...tools)
+  assert.equal((await cap.captureSession({ tool: "codex", session_id: "exec-1", transcript_path: exec, cwd: nowhere })).why, "non-interactive run outside a workstream folder")
+  const sdk = await write("sdk1", ...Array.from({ length: 3 }, (_, i) => ({ type: "user", entrypoint: "sdk-cli", message: { content: `p${i}` } })),
+    { type: "assistant", entrypoint: "sdk-cli", message: { content: [{ type: "tool_use", name: "Edit", input: { file_path: path.join(nowhere, "x") } }] } })
+  assert.equal((await cap.captureSession({ tool: "claude", session_id: "sdk-1", transcript_path: sdk, cwd: nowhere })).why, "non-interactive run outside a workstream folder")
+  // Inside a workstream's folder a scripted run is still logged.
+  const inSite = await cap.captureSession({ tool: "codex", session_id: "exec-2", transcript_path: exec, cwd: site })
+  assert.equal(inSite.action, "linked")
+})
+
+test("in a workstream's folder, a one-prompt session that used a tool is logged; a toolless one isn't", async () => {
+  const did = await write("did1", { type: "user", message: { content: "make hello.txt" } },
+    { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "echo hello > hello.txt 2>&1 && cat hello.txt > /dev/null" } }] } })
+  const r = await cap.captureSession({ tool: "claude", session_id: "did-1", transcript_path: did, cwd: site })
+  assert.equal(r.action, "linked")
+  const { data } = matter(await fs.readFile(r.file, "utf-8"))
+  assert.deepEqual(data.files_touched, [store.tildify(path.join(site, "hello.txt"))]) // shell write found; /dev/null and 2>&1 ignored
+  const idle = await write("idle1", { type: "user", message: { content: "what's open?" } }, { type: "assistant", message: { content: [{ type: "text", text: "ET-3" }] } })
+  assert.equal((await cap.captureSession({ tool: "claude", session_id: "idle-1", transcript_path: idle, cwd: site })).why, "too small")
+})
+
+test("long close notes are clipped in open.md", async () => {
+  const it = await store.addItem("acme-site", "Clip me")
+  const closed = await store.closeItem("acme-site", it.id, { note: "x".repeat(400) })
+  assert.ok(closed.closed.length < 200)
+  assert.match(closed.closed, /…$/)
+})

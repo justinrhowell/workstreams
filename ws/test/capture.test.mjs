@@ -202,3 +202,16 @@ test("one-prompt sessions that do real work or use the ws MCP tools are kept", a
   ))
   assert.equal((await cap.captureSession({ tool: "claude", session_id: "busy0001", transcript_path: r, cwd: site })).action, "linked")
 })
+
+test("E2E: a workstream named through a symlinked folder claims sessions reported by real path", async () => {
+  const real = path.join(tmp, "real-proj")
+  const link = path.join(tmp, "link-proj")
+  await fs.mkdir(path.join(real, "sub"), { recursive: true })
+  await fs.symlink(real, link)
+  await store.createWorkstream("via-link", { title: "Via link", cwd: link })
+  const list = await store.listWorkstreams()
+  const realCwd = await fs.realpath(path.join(real, "sub"))
+  assert.equal(cap.matchWorkstream(list, realCwd, null).link, "via-link")
+  assert.equal(cap.matchWorkstream(list, path.join(link, "sub"), null).link, "via-link")
+  await store.updateWorkstream("via-link", { status: "done" })
+})

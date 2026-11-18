@@ -3,7 +3,7 @@
 // hooks into each tool's settings, and registers the MCP server. Idempotent: re-running
 // reconciles ws's own entries (hooks, MCP, CLI link) and leaves everything else alone.
 import { spawnSync } from "node:child_process"
-import { promises as fs, existsSync } from "node:fs"
+import { promises as fs, existsSync, realpathSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
@@ -51,6 +51,20 @@ export function classifyHook(cmd, tool, event) {
   return "other"
 }
 
+// Does an existing ws hook already run the same ws, with the same data folder? Spelling
+// doesn't matter ("$HOME/.local/bin/ws", "~/.local/bin/ws", the link or its target), so
+// re-running setup leaves a working hand-written hook alone (Codex would otherwise ask
+// to trust it again).
+const realOr = (p) => { try { return realpathSync(p) } catch { return path.resolve(p) } }
+export function sameHook(cmd, tool, event, { wsPath, root, home }) {
+  const m = String(cmd || "").trim().match(new RegExp(`^(?:WS_ROOT=(${WORD})\\s+)?(${WORD})\\s+hook\\s+${tool}\\s+${event}$`))
+  if (!m) return false
+  const exp = (w) => unquote(w).replace(/^(\$HOME|\$\{HOME\}|~)(?=\/)/, home)
+  const pinned = m[1] ? realOr(exp(m[1])) : null
+  const wanted = needsPin(root, home) ? realOr(root) : null
+  return pinned === wanted && realOr(exp(m[2])) === realOr(wsPath)
+}
+
 // Pure: returns { settings, changes, notes } with ws's hook entries added, updated or
 // de-duplicated. Hooks that aren't purely ws's are never changed.
 export function mergeHooks(settings, tool, opts) {
@@ -91,7 +105,9 @@ export function mergeHooks(settings, tool, opts) {
         continue
       }
       seen.add(key)
-      if (h.command !== command || h.timeout !== timeout) { h.command = command; h.timeout = timeout; updated = true }
+      const same = h.command === command || sameHook(h.command, tool, event, { ...opts, home: opts.home || os.homedir() })
+      if (!same) { h.command = command; updated = true }
+      if (h.timeout !== timeout) { h.timeout = timeout; updated = true }
       if (g.matcher) notes.push(`${name}: a ws hook sits under matcher "${g.matcher}", so it only runs for those sessions`)
     }
     if (updated) changes.push(`updated ${name}`)

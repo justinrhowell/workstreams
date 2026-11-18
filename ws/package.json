@@ -1,0 +1,18 @@
+{
+  "name": "ws-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Workstream state for Claude Code and Codex: save status, recall a resume prompt.",
+  "bin": {
+    "ws": "bin/ws.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "gray-matter": "^4.0.3",
+    "zod": "^4.6.7"
+  }
+}

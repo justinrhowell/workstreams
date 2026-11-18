@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '20.x'
+
+# ws runs on your own machine against folders of markdown files, so there is
+# nothing to deploy and no credentials to inject. CI proves the board lints,
+# typechecks, tests and builds, and that the ws CLI, hooks, summarizer, setup and
+# MCP server pass their own suite.
+
+jobs:
+  verify:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['20.x', '22.x']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run type-check
+
+      - name: Test
+        run: npm run test:ci
+
+      - name: Build
+        run: npm run build
+
+  mcp:
+    name: MCP server starts
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ws/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ws
+
+      # Handshake over stdio and list the tools, so a broken server is caught
+      # here rather than the first time someone wires it into Claude Code.
+      - name: Initialize and list tools
+        run: |
+          export WS_ROOT="$(mktemp -d)"
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | node ws/mcp/server.mjs | tee /tmp/mcp.out
+          for t in ws_list ws_show ws_compose ws_item_add ws_item_close ws_log; do
+            grep -q "\"$t\"" /tmp/mcp.out || { echo "missing tool $t"; exit 1; }
+          done
+
+  ws:
+    name: ws CLI, hooks, summarizer, MCP
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['20.x', '22.x']
+    defaults:
+      run:
+        working-directory: ws
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ws/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Uses temp WS_ROOTs and a fake model endpoint; never touches real data.
+      - name: Test
+        run: npm test

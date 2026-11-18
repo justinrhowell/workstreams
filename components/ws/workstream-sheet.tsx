@@ -14,9 +14,9 @@ import {
 import { api, ago, type Detail } from "./api"
 import { ProposalCard } from "./review-list"
 
-type Props = { id: string | null; onClose: () => void; onChange: () => void; onError: (m: string) => void }
+type Props = { id: string | null; onClose: () => void; onCloseFocus?: () => void; onChange: () => void; onError: (m: string) => void }
 
-export function WorkstreamSheet({ id, onClose, onChange, onError }: Props) {
+export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }: Props) {
   const [d, setD] = useState<Detail | null>(null)
   const [newItem, setNewItem] = useState("")
   const [newWaiting, setNewWaiting] = useState("")
@@ -64,9 +64,20 @@ export function WorkstreamSheet({ id, onClose, onChange, onError }: Props) {
 
   return (
     <Sheet open={!!id} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl">
+      <SheetContent
+        side="right"
+        className="w-full overflow-y-auto sm:max-w-2xl"
+        onCloseAutoFocus={(e) => {
+          // The panel has no trigger element; return focus to the card that opened it.
+          if (onCloseFocus) { e.preventDefault(); onCloseFocus() }
+        }}
+      >
         {!d ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
+          <>
+            <SheetTitle className="sr-only">Workstream</SheetTitle>
+            <SheetDescription className="sr-only">Loading workstream details</SheetDescription>
+            <p role="status" className="text-sm text-muted-foreground">Loading…</p>
+          </>
         ) : (
           <div className="space-y-6">
             <SheetHeader>
@@ -82,7 +93,7 @@ export function WorkstreamSheet({ id, onClose, onChange, onError }: Props) {
               <label className="text-xs">
                 <span className="mb-1 block text-muted-foreground">Status</span>
                 <Select value={d.status} onValueChange={(v) => act({ action: "status", status: v }, `Status: ${v}`)} disabled={busy}>
-                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="w-32" aria-label="Status"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {[...["active", "waiting", "parked", "done"], ...(d.status === "archived" ? ["archived"] : [])].map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
                   </SelectContent>
@@ -119,7 +130,7 @@ export function WorkstreamSheet({ id, onClose, onChange, onError }: Props) {
                       {i.text}
                       {i.waiting && <span className="ml-1 text-xs text-muted-foreground">· waiting on {i.waiting}</span>}
                     </span>
-                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => act({ action: "close", item: i.id }, `Closed ${i.id}`)}>
+                    <Button size="sm" variant="ghost" disabled={busy} aria-label={`Close item ${i.id}: ${i.text}`} onClick={() => act({ action: "close", item: i.id }, `Closed ${i.id}`)}>
                       Close
                     </Button>
                   </li>
@@ -163,7 +174,7 @@ export function WorkstreamSheet({ id, onClose, onChange, onError }: Props) {
                 <h3 className="text-sm font-medium">Resume prompt</h3>
                 <div className="flex gap-1">
                   {(["claude", "codex"] as const).map((t) => (
-                    <Button key={t} size="sm" variant={tool === t ? "secondary" : "ghost"} onClick={() => setTool(t)}>{t}</Button>
+                    <Button key={t} size="sm" variant={tool === t ? "secondary" : "ghost"} aria-pressed={tool === t} aria-label={`Resume prompt for ${t}`} onClick={() => setTool(t)}>{t}</Button>
                   ))}
                 </div>
               </div>

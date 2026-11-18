@@ -47,16 +47,16 @@ function Row({ r, live, act }: { r: InboxRow; live: Workstream[]; act: (b: Recor
         </div>
       </div>
       <Select value={target} onValueChange={setTarget}>
-        <SelectTrigger className="w-56" aria-label="Workstream"><SelectValue placeholder="Assign to…" /></SelectTrigger>
+        <SelectTrigger className="w-56" aria-label={`Workstream for ${r.title || "untitled session"}`}><SelectValue placeholder="Assign to…" /></SelectTrigger>
         <SelectContent>
           {live.map((w) => (
             <SelectItem key={w.id} value={w.id}>{w.id}{r.suggestions.includes(w.id) ? " (suggested)" : ""}</SelectItem>
           ))}
         </SelectContent>
       </Select>
-      <Button size="sm" disabled={!target} onClick={() => act({ action: "assign", session: r.session, id: target }, `Linked to ${target}`)}>Assign</Button>
-      <Button size="sm" variant="ghost" onClick={() => act({ action: "ignore", session: r.session }, "Ignored")}>Ignore</Button>
-      <Button size="sm" variant="ghost" title={`Ignore every future session in ${r.cwd}`} onClick={() => act({ action: "ignore", session: r.session, cwd: true }, `Ignoring ${r.cwd}`)}>
+      <Button size="sm" disabled={!target} aria-label={`Assign ${r.title || "untitled session"}`} onClick={() => act({ action: "assign", session: r.session, id: target }, `Linked to ${target}`)}>Assign</Button>
+      <Button size="sm" variant="ghost" aria-label={`Ignore ${r.title || "untitled session"}`} onClick={() => act({ action: "ignore", session: r.session }, "Ignored")}>Ignore</Button>
+      <Button size="sm" variant="ghost" aria-label={`Ignore every future session in ${r.cwd}`} title={`Ignore every future session in ${r.cwd}`} onClick={() => act({ action: "ignore", session: r.session, cwd: true }, `Ignoring ${r.cwd}`)}>
         Ignore folder
       </Button>
     </li>

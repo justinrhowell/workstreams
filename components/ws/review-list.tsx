@@ -26,7 +26,7 @@ export function ReviewList({ onChange, onOpen }: { onChange: () => void; onOpen:
     <div className="max-w-3xl space-y-3">
       {rows.map((p) => (
         <div key={p.ws + p.session}>
-          <button className="mb-1 text-sm font-medium underline-offset-2 hover:underline" onClick={() => onOpen(p.ws)}>{p.ws}</button>
+          <button className="mb-1 text-sm font-medium underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" onClick={() => onOpen(p.ws)}>{p.ws}</button>
           <ProposalCard p={p} onDone={() => { load(); onChange() }} />
         </div>
       ))}
@@ -115,8 +115,8 @@ export function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void })
         </label>
       ) : null)}
       <div className="mt-3 flex gap-2">
-        <Button size="sm" disabled={busy} onClick={() => act("accept")}>Accept</Button>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => act("reject")}>Reject</Button>
+        <Button size="sm" disabled={busy} aria-label={`Accept draft for ${p.ws}`} onClick={() => act("accept")}>Accept</Button>
+        <Button size="sm" variant="ghost" disabled={busy} aria-label={`Reject draft for ${p.ws}`} onClick={() => act("reject")}>Reject</Button>
       </div>
     </div>
   )

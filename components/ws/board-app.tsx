@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -23,6 +23,12 @@ export function BoardApp() {
   const [error, setError] = useState<string | null>(null)
   const [showArchived, setShowArchived] = useState(false)
   const [trash, setTrash] = useState<TrashRow[]>([])
+  // Where focus was when a workstream was opened, so closing the panel puts it back there.
+  const opener = useRef<HTMLElement | null>(null)
+  const open = useCallback((id: string) => {
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setSelected(id)
+  }, [])
 
   const refresh = useCallback(async () => {
     try {
@@ -43,8 +49,8 @@ export function BoardApp() {
     return () => { clearTimeout(first); clearInterval(t) }
   }, [refresh])
 
-  if (error && !board) return <p className="p-8 text-sm text-red-600">Couldn&apos;t read workstreams: {error}</p>
-  if (!board) return <p className="p-8 text-sm text-muted-foreground">Loading…</p>
+  if (error && !board) return <p role="alert" className="p-8 text-sm text-red-600">Couldn&apos;t read workstreams: {error}</p>
+  if (!board) return <p role="status" className="p-8 text-sm text-muted-foreground">Loading…</p>
 
   const stale = board.workstreams.filter((w) => isStale(w, board.staleDays))
   const archived = board.workstreams.filter((w) => w.status === "archived")
@@ -81,7 +87,7 @@ export function BoardApp() {
             <p className="mb-3 text-sm text-amber-700 dark:text-amber-400">
               {stale.length} {stale.length === 1 ? "workstream has" : "workstreams have"} had no session in {board.staleDays}+ days:{" "}
               {stale.map((w, i) => (
-                <button key={w.id} className="underline underline-offset-2" onClick={() => setSelected(w.id)}>
+                <button key={w.id} className="underline underline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" onClick={() => open(w.id)}>
                   {w.id}{i < stale.length - 1 ? ", " : ""}
                 </button>
               ))}
@@ -91,17 +97,22 @@ export function BoardApp() {
             {columns.map((col) => {
               const cards = board.workstreams.filter((w) => w.status === col.status)
               return (
-                <section key={col.status} aria-label={col.label}>
-                  <h2 className="mb-2 flex items-baseline gap-2 text-sm font-medium">
+                <section key={col.status} aria-labelledby={`col-${col.status}`}>
+                  <h2 id={`col-${col.status}`} className="mb-2 flex items-baseline gap-2 text-sm font-medium">
                     {col.label} <span className="text-muted-foreground">{cards.length}</span>
                     {col.hint && <span className="text-xs font-normal text-muted-foreground">{col.hint}</span>}
                   </h2>
-                  <div className="space-y-2">
-                    {cards.map((w) => (
-                      <Card key={w.id} w={w} stale={isStale(w, board.staleDays)} onOpen={() => setSelected(w.id)} />
-                    ))}
-                    {!cards.length && <p className="text-xs text-muted-foreground">None</p>}
-                  </div>
+                  {cards.length ? (
+                    <ul className="space-y-2">
+                      {cards.map((w) => (
+                        <li key={w.id}>
+                          <Card w={w} stale={isStale(w, board.staleDays)} onOpen={() => open(w.id)} />
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">None</p>
+                  )}
                 </section>
               )
             })}
@@ -110,7 +121,7 @@ export function BoardApp() {
         {(archived.length > 0 || trash.length > 0) && (
           <div className="mt-6 space-y-3 border-t pt-4 text-sm">
             {archived.length > 0 && (
-              <Button size="sm" variant="ghost" onClick={() => setShowArchived((v) => !v)}>
+              <Button size="sm" variant="ghost" aria-pressed={showArchived} onClick={() => setShowArchived((v) => !v)}>
                 {showArchived ? "Hide archived" : `Show archived (${archived.length})`}
               </Button>
             )}
@@ -121,7 +132,7 @@ export function BoardApp() {
                   {trash.map((t) => (
                     <li key={t.name} className="flex items-center gap-3 p-2">
                       <span className="flex-1">{t.title || t.id} <span className="text-xs text-muted-foreground">{t.id} · deleted {t.deleted_at.slice(0, 10)}</span></span>
-                      <Button size="sm" variant="outline" onClick={() => restore(t.name)}>Restore</Button>
+                      <Button size="sm" variant="outline" aria-label={`Restore ${t.title || t.id}`} onClick={() => restore(t.name)}>Restore</Button>
                     </li>
                   ))}
                 </ul>
@@ -144,6 +155,7 @@ export function BoardApp() {
       <WorkstreamSheet
         id={selected}
         onClose={() => setSelected(null)}
+        onCloseFocus={() => opener.current?.focus()}
         onChange={() => {
           refresh()
         }}
@@ -157,7 +169,7 @@ function Card({ w, stale, onOpen }: { w: Workstream; stale: boolean; onOpen: () 
   return (
     <button
       onClick={onOpen}
-      className="block w-full rounded-md border bg-card p-3 text-left transition-colors hover:border-foreground/30 focus-visible:outline focus-visible:outline-2"
+      className="block w-full rounded-md border bg-card p-3 text-left transition-colors hover:border-foreground/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
     >
       <div className="flex items-start justify-between gap-2">
         <span className="text-sm font-medium leading-snug">{w.title}</span>

@@ -84,7 +84,7 @@ The board is the Next app at `/`. Its API routes import `ws/lib` directly.
 ## Platforms
 
 - **macOS:** everything, including `ws board --install` (a launchd agent).
-- **Linux:** everything except the background board service; run `ws board` in a terminal instead. Clipboard copy uses `wl-copy`, `xclip` or `xsel`.
+- **Linux:** everything, including `ws board --install` (a `systemctl --user` unit; logs in the journal). Clipboard copy uses `wl-copy`, `xclip` or `xsel`.
 - **Windows:** untested. WSL should behave like Linux.
 
 ## History

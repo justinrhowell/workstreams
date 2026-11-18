@@ -25,7 +25,7 @@ const MIN_TOOL_CALLS = 3
 const PATCH_RE = /\*\*\* (?:Update|Add|Delete) File: ([^\n"\\]+)/g
 
 export async function readTranscript(tool, transcriptPath, sessionId) {
-  const info = { title: null, started: null, ended: null, userTurns: 0, toolCalls: 0, files: new Set(), wsCalls: [] }
+  const info = { title: null, started: null, ended: null, userTurns: 0, toolCalls: 0, files: new Set(), wsCalls: [], interactive: true }
   let text = ""
   try { text = await fs.readFile(transcriptPath, "utf-8") } catch { return finish(info) }
   for (const line of text.split("\n")) {
@@ -47,7 +47,14 @@ function finish(info) {
   return { ...info, files: [...info.files].filter((f) => !SCRATCH.test(f)).slice(0, 40) }
 }
 
+// Files a shell command writes: "> f", ">> f", "tee [-a] f". Not /dev/*, not fd redirects (2>&1).
+const SHELL_WRITE_RE = /(?:^|[\s;&|])(?:\d?>>?|tee(?:\s+-a)?)\s*(?!&)(["']?)([^\s"'|;&<>]+)\1/g
+function shellWrites(cmd, files) {
+  for (const m of String(cmd).matchAll(SHELL_WRITE_RE)) if (!m[2].startsWith("/dev/")) files.add(m[2])
+}
+
 function parseClaude(d, info) {
+  if (d.entrypoint === "sdk-cli") info.interactive = false // `claude -p` or the Agent SDK
   if (d.type === "ai-title" && d.aiTitle) info.title = d.aiTitle
   if (d.type === "custom-title" && d.customTitle) info.title = d.customTitle
   if (d.isSidechain) return
@@ -65,12 +72,14 @@ function parseClaude(d, info) {
       const fp = c.input?.file_path || c.input?.notebook_path
       if (fp && /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(c.name)) info.files.add(fp)
       if (c.name === "Bash" && /\bws (item|log)\b/.test(c.input?.command || "")) info.wsCalls.push(c.input.command)
+      if (c.name === "Bash") shellWrites(c.input?.command || "", info.files)
     }
   }
 }
 
 function parseCodex(d, info) {
   const p = d.payload || {}
+  if (d.type === "session_meta" && (p.originator === "codex_exec" || p.source === "exec")) info.interactive = false
   if (p.type === "item_completed" && p.item?.type === "UserMessage") info.userTurns++
   if (p.type === "item_completed" && p.item?.type === "McpToolCall") {
     info.toolCalls++
@@ -80,6 +89,7 @@ function parseCodex(d, info) {
     info.toolCalls++
     const input = String(p.input ?? p.arguments ?? "")
     for (const m of input.matchAll(PATCH_RE)) info.files.add(m[1].trim())
+    shellWrites(input, info.files)
     if (/\bws (item|log)\b/.test(input)) info.wsCalls.push(input.slice(0, 200))
   }
 }
@@ -205,9 +215,18 @@ async function captureSessionInner({ tool, session_id, transcript_path, cwd, rea
   if (!link) for (const ig of await ignoredCwds()) if (under(cwd, ig)) return { action: "skip", why: `ignored cwd ${ig}` }
 
   const t = await readTranscript(tool, transcript_path, session_id)
+  // Shell commands usually write relative paths: resolve them against the session's folder.
+  t.files = t.files.map((f) => (path.isAbsolute(store.expand(f)) ? f : path.join(/* turbopackIgnore: true */ cwd, f))).filter((f) => !SCRATCH.test(f))
 
-  // Tiny sessions (one-off questions, -p/exec probes) are noise unless `ws go` launched them.
-  const tiny = t.userTurns < MIN_USER_TURNS && t.toolCalls < MIN_TOOL_CALLS && !t.files.length && !t.wsCalls.length
+  // Scripted runs (`claude -p`, `codex exec`) outside any workstream's folder are automation,
+  // not work to file: they never go to the inbox.
+  if (!t.interactive && !link) return { action: "skip", why: "non-interactive run outside a workstream folder" }
+  // Tiny sessions are noise. In a workstream's own folder only a session that did nothing
+  // (no tools, no files) is dropped; elsewhere the bar is higher, since it lands in the inbox.
+  const idle = !t.files.length && !t.wsCalls.length
+  const tiny = link
+    ? idle && t.toolCalls === 0 && t.userTurns < MIN_USER_TURNS
+    : idle && t.userTurns < MIN_USER_TURNS && t.toolCalls < MIN_TOOL_CALLS
   if (tiny && !(link && wsId === link)) return { action: "skip", why: "too small" }
 
   const meta = {

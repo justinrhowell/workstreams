@@ -228,17 +228,17 @@ export async function deleteWorkstream(id) {
   if (await exists(props)) await fs.rename(props, path.join(dest, "proposals"))
   // Queued and failed summary jobs too (a running drain skips jobs whose workstream is gone).
   for (const [from, to] of [["queue", "queue"], [path.join("queue", "failed"), "queue-failed"]]) {
-    const qdir = path.join(ROOT, from)
+    const qdir = path.join(/* turbopackIgnore: true */ ROOT, from)
     let queued = []
-    try { queued = (await fs.readdir(qdir)).filter((f) => f.endsWith(".json")) } catch {}
+    try { queued = (await fs.readdir(/* turbopackIgnore: true */ qdir)).filter((f) => f.endsWith(".json")) } catch {}
     for (const f of queued) {
       try {
         // Under the job's lock, the same one a running drain takes to update it.
-        await withLock(path.join(qdir, f), async () => {
-          const job = JSON.parse(await fs.readFile(path.join(qdir, f), "utf-8"))
+        await withLock(path.join(/* turbopackIgnore: true */ qdir, f), async () => {
+          const job = JSON.parse(await fs.readFile(/* turbopackIgnore: true */ path.join(/* turbopackIgnore: true */ qdir, f), "utf-8"))
           if (job.ws === id) {
             await fs.mkdir(path.join(dest, to), { recursive: true })
-            await fs.rename(path.join(qdir, f), path.join(dest, to, f))
+            await fs.rename(path.join(/* turbopackIgnore: true */ qdir, f), path.join(dest, to, f))
           }
         })
       } catch {}
@@ -286,11 +286,11 @@ export async function restoreWorkstream(name) {
   }
   for (const [from, to] of [["queue", "queue"], ["queue-failed", path.join("queue", "failed")]]) {
     if (!(await exists(path.join(src, from)))) continue
-    await fs.mkdir(path.join(ROOT, to), { recursive: true })
+    await fs.mkdir(path.join(/* turbopackIgnore: true */ ROOT, to), { recursive: true })
     for (const f of await fs.readdir(path.join(src, from))) {
       // A job re-queued since the delete is newer: keep it, drop the trashed copy.
-      if (await exists(path.join(ROOT, to, f))) continue
-      await fs.rename(path.join(src, from, f), path.join(ROOT, to, f))
+      if (await exists(path.join(/* turbopackIgnore: true */ ROOT, to, f))) continue
+      await fs.rename(path.join(src, from, f), path.join(/* turbopackIgnore: true */ ROOT, to, f))
     }
   }
   await fs.rm(src, { recursive: true, force: true })
@@ -528,7 +528,9 @@ export function closeItem(id, itemId, { session, note } = {}) {
     if (!item) throw new Error(`${itemId} not found in ${id}`)
     if (item.done) throw new Error(`${itemId} is already closed`)
     item.done = true
-    item.closed = [today(), session && oneLine(session).slice(0, 8), note && oneLine(note).replace(/[()]/g, "")].filter(Boolean).join(", ")
+    // Keep open.md readable: the full evidence lives in the session log, not in this line.
+    const n = note && oneLine(note).replace(/[()]/g, "")
+    item.closed = [today(), session && oneLine(session).slice(0, 8), n && (n.length > 160 ? n.slice(0, 159) + "…" : n)].filter(Boolean).join(", ")
     return item
   })
 }

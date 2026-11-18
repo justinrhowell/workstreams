@@ -1,7 +1,16 @@
+import path from "node:path"
+import { fileURLToPath } from "node:url"
+
 /** @type {import('next').NextConfig} */
 // Local-only app: no remote images, no analytics, and a CSP without
 // upgrade-insecure-requests (which breaks http://localhost assets).
+// This folder is the project root, whatever lockfiles sit further up (e.g. a stray
+// ~/package-lock.json, which otherwise makes Next warn on every start).
+const root = path.dirname(fileURLToPath(import.meta.url))
+
 const nextConfig = {
+  outputFileTracingRoot: root,
+  turbopack: { root },
   // The background service builds and serves from .next-prod, so a dev server
   // (which uses .next) can never overwrite the build it is serving.
   distDir: process.env.NEXT_DIST_DIR || ".next",

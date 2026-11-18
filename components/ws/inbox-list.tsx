@@ -9,7 +9,10 @@ import { api, type InboxRow, type Workstream } from "./api"
 export function InboxList({ workstreams, onChange }: { workstreams: Workstream[]; onChange: () => void }) {
   const [rows, setRows] = useState<InboxRow[] | null>(null)
   const load = useCallback(async () => setRows(await api.inbox().catch(() => [])), [])
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    const t = setTimeout(load, 0) // fetch after mount, outside the effect body
+    return () => clearTimeout(t)
+  }, [load])
 
   async function act(body: Record<string, unknown>, done: string) {
     try {

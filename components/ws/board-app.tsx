@@ -36,10 +36,11 @@ export function BoardApp() {
   }, [])
 
   // Sessions end in other windows; keep the board current without a reload.
+  // The first load runs from a timer too, so no state is set synchronously in the effect.
   useEffect(() => {
-    refresh()
+    const first = setTimeout(refresh, 0)
     const t = setInterval(refresh, 10_000)
-    return () => clearInterval(t)
+    return () => { clearTimeout(first); clearInterval(t) }
   }, [refresh])
 
   if (error && !board) return <p className="p-8 text-sm text-red-600">Couldn&apos;t read workstreams: {error}</p>

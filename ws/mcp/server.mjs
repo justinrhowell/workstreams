@@ -15,6 +15,11 @@ const fail = (e) => ({ content: [{ type: "text", text: `Error: ${e.message}` }],
 const safe = (fn) => async (args) => { try { return await fn(args) } catch (e) { return fail(e) } }
 const id = z.string().describe("Workstream id, e.g. acme-site (see ws_list)")
 
+if (store.ROOT_PROBLEM) {
+  console.error(`ws MCP server: ${store.ROOT_PROBLEM}`)
+  process.exit(1)
+}
+
 const server = new McpServer({ name: "ws", version: "0.1.0" })
 
 server.registerTool(

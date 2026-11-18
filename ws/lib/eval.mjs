@@ -68,6 +68,8 @@ export function checkFloors(m, floors) {
 }
 
 export async function runEval({ runs = 3, only, log = () => {} } = {}) {
+  runs = Number(runs)
+  if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be a whole number of at least 1")
   const cfg = await summarize.llmConfig()
   if (!cfg) throw new Error("No model configured (llm.url in config.json)")
   if (!(await summarize.endpointUp(cfg))) throw new Error(`Model endpoint unreachable: ${cfg.url}`)
@@ -75,6 +77,7 @@ export async function runEval({ runs = 3, only, log = () => {} } = {}) {
   if (!cases.length) throw new Error(`No eval cases in ${store.tildify(path.join(EVAL_DIR, "cases"))}`)
   const rows = []
   const perCase = []
+  let errors = 0
   for (const c of cases) {
     const digest = await summarize.digestTranscript(c.tool || "claude", c.transcriptPath)
     const open = c.open.map((i) => ({ ...i, done: false }))
@@ -87,6 +90,7 @@ export async function runEval({ runs = 3, only, log = () => {} } = {}) {
         caseRows.push(s)
         log(`${c.name} run ${r + 1}: verified ${p.close.map((x) => x.id).join(",") || "-"} | unverified ${p.unverified.map((x) => x.id).join(",") || "-"}${s.fpVerified.length ? `  FALSE: ${s.fpVerified.join(",")}` : ""}`)
       } catch (e) {
+        errors++
         log(`${c.name} run ${r + 1}: error ${e.message}`)
       }
     }
@@ -96,7 +100,10 @@ export async function runEval({ runs = 3, only, log = () => {} } = {}) {
   const metrics = aggregate(rows)
   const floors = await loadFloors()
   const fails = checkFloors(metrics, floors)
-  const report = { at: new Date().toISOString(), model: cfg.model || "(from /models)", runs, metrics, floors, fails, perCase }
+  // A run that errored scores nothing, and an empty score is "perfect": count errors as failures.
+  if (errors) fails.push(`${errors} of ${cases.length * runs} runs failed (model or validation error)`)
+  if (!rows.length) fails.push("no run produced a score")
+  const report = { at: new Date().toISOString(), model: cfg.model || "(from /models)", runs, errors, metrics, floors, fails, perCase }
   await fs.mkdir(path.join(EVAL_DIR, "reports"), { recursive: true })
   const file = path.join(EVAL_DIR, "reports", `${report.at.replace(/[:.]/g, "-")}.json`)
   await fs.writeFile(file, JSON.stringify(report, null, 2))

@@ -11,12 +11,14 @@ import { compose, checkSources, stalePathsIn } from "../lib/compose.mjs"
 import * as capture from "../lib/capture.mjs"
 import * as summarize from "../lib/summarize.mjs"
 import { runEval } from "../lib/eval.mjs"
-import { runSetup, detectTools } from "../lib/setup.mjs"
+import { loadConfig } from "../lib/config.mjs"
+import { fileURLToPath } from "node:url"
 
 const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.tildify(store.ROOT)})
 
   ws setup [--claude] [--codex] [--dry-run] [--no-link] [--no-hooks] [--no-mcp]
                                    create the data folder, put ws on PATH, add hooks + MCP to Claude Code / Codex
+  ws setup --uninstall [--dry-run] remove ws's hooks, MCP entries and CLI link (your data is kept)
   ws                               pick a workstream, then \`go\`
   ws ls [--all]                    list workstreams (active + waiting; --all adds parked/done/archived)
   ws show <id>                     brief, open items, recent sessions
@@ -157,11 +159,13 @@ async function cmdGo(id) {
   const { ws, tool: t, text } = await compose(id, { tool, inline: opt.inline })
   const tmp = path.join(os.tmpdir(), `ws-${id}-${Date.now()}.md`)
   await fs.writeFile(tmp, text)
+  // $VISUAL, then $EDITOR, then nano. Run through the shell so quoted paths and
+  // arguments in the variable ("code --wait", "/Applications/My Editor/bin/ed") work.
   const editor = process.env.VISUAL || process.env.EDITOR || "nano"
   // Put the cursor on the input slot where the editor supports +LINE.
   const slotLine = text.split("\n").findIndex((l) => l.includes(store.fillVars(ws.input, { title: ws.title, ...ws.vars }).split("\n")[0])) + 1
-  const edArgs = /(^|\/)(nano|vim?|nvim|emacs|micro)$/.test(editor.split(" ")[0]) && slotLine > 0 ? [`+${slotLine}`, tmp] : [tmp]
-  const ed = spawnSync(editor.split(" ")[0], [...editor.split(" ").slice(1), ...edArgs], { stdio: "inherit" })
+  const edArgs = /(^|\/)(nano|vim?|nvim|emacs|micro)['"]?$/.test(editor.trim().split(/\s+/)[0]) && slotLine > 0 ? [`+${slotLine}`, tmp] : [tmp]
+  const ed = spawnSync("sh", ["-c", `${editor} "$@"`, "ws-editor", ...edArgs], { stdio: "inherit" })
   if (ed.status !== 0) die(`editor exited with ${ed.status}; not launching`)
   const edited = (await fs.readFile(tmp, "utf-8")).trim()
   await fs.rm(tmp, { force: true })
@@ -426,15 +430,16 @@ async function cmdReview(sub, n) {
 
 // ------------------------------------------------------------------ board service
 // Overridable in $WS_ROOT/config.json: {"board": {"port": 3311, "label": "ws.board"}}
-// A broken config.json must never break `ws hook`, so parse errors fall back to defaults.
-const CONFIG = await fs.readFile(path.join(store.ROOT, "config.json"), "utf-8").then(JSON.parse).catch(() => ({}))
-const BOARD_LABEL = process.env.WS_BOARD_LABEL || CONFIG.board?.label || "ws.board"
-const BOARD_PORT = String(process.env.WS_BOARD_PORT || CONFIG.board?.port || 3311)
+// Validated config; loadConfig never throws, so a broken config.json can't break `ws hook`.
+const CONFIG = await loadConfig()
+const envPort = Number(process.env.WS_BOARD_PORT)
+const BOARD_LABEL = (process.env.WS_BOARD_LABEL && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(process.env.WS_BOARD_LABEL) ? process.env.WS_BOARD_LABEL : null) || CONFIG.board.label || "ws.board"
+const BOARD_PORT = String(Number.isInteger(envPort) && envPort > 0 && envPort < 65536 ? envPort : CONFIG.board.port || 3311)
 const BOARD_URL = `http://127.0.0.1:${BOARD_PORT}`
 const BOARD_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${BOARD_LABEL}.plist`)
 const BOARD_LOG = path.join(os.homedir(), "Library", "Logs", "ws-board.log")
 const BOARD_DIST = ".next-prod"
-const boardApp = () => path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/%20/g, " ")), "..", "..")
+const boardApp = () => path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 const gui = () => `gui/${process.getuid()}`
 
 async function boardUp(timeoutMs = 0) {
@@ -564,9 +569,17 @@ async function cmdBoard() {
 }
 
 async function cmdSetup() {
+  // Loaded only here, so nothing in setup can affect hooks or other commands.
+  const { runSetup, runUninstall, detectTools } = await import("../lib/setup.mjs")
   const tools = await detectTools({ claude: opt.claude, codex: opt.codex })
+  if (opt.uninstall) {
+    const { problems } = await runUninstall({ tools, dryRun: opt["dry-run"] })
+    if (problems.length) die(`\nNot everything was removed:\n  ${problems.join("\n  ")}`)
+    return
+  }
   if (!tools.length && !opt["no-hooks"]) console.log("Neither Claude Code nor Codex was found; setting up the data folder and CLI only. Re-run with --claude or --codex later.")
-  await runSetup({ tools, link: !opt["no-link"], hooks: !opt["no-hooks"], mcp: !opt["no-mcp"], dryRun: opt["dry-run"] })
+  const { problems } = await runSetup({ tools, link: !opt["no-link"], hooks: !opt["no-hooks"], mcp: !opt["no-mcp"], dryRun: opt["dry-run"] })
+  if (problems.length) die(`\nSetup finished with problems:\n  ${problems.join("\n  ")}`)
   if (!opt["dry-run"]) console.log(`\nNext: ws new <id> --title "…" --cwd <project folder>, then start a session in that folder. \`ws board\` opens the board.`)
 }
 
@@ -580,7 +593,7 @@ async function cmdHook(tool, event) {
     if (event === "start") {
       // Structured output: Codex parses stdout that starts with "[" as JSON, and both tools accept this form.
       // Retry any queued summaries while we're here (detached; never blocks startup).
-      try { if ((await summarize.listQueue()).length && (await summarize.llmConfig())) summarize.spawnDrain() } catch {}
+      try { if (process.env.WS_NO_SPAWN !== "1" && (await summarize.listQueue()).length && (await summarize.llmConfig())) summarize.spawnDrain() } catch {}
       const note = await capture.startContext(ctx)
       if (note) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: note } }) + "\n")
     } else if (event === "end") {
@@ -593,8 +606,24 @@ async function cmdHook(tool, event) {
   process.exit(0)
 }
 
+// Options that only mean something to one command; anything else is an error there,
+// so `ws setup --unistall` (typo) or `ws board --dry-run` doesn't silently do the default.
+const ONLY = {
+  setup: ["claude", "codex", "dry-run", "no-link", "no-hooks", "no-mcp", "uninstall", "help"],
+  board: ["install", "uninstall", "rebuild", "status", "dev", "port", "no-open", "help"],
+}
+
 try {
   const [cmd, ...rest] = args
+  if (store.ROOT_PROBLEM) {
+    if (cmd === "hook") process.exit(0) // hooks never fail a session
+    die(store.ROOT_PROBLEM)
+  }
+  if (ONLY[cmd]) {
+    const bad = Object.keys(opt).filter((k) => !ONLY[cmd].includes(k))
+    if (bad.length) die(`ws ${cmd}: unknown option ${bad.map((b) => `--${b}`).join(", ")}\n\n${HELP}`)
+  }
+  if (cmd !== "hook" && CONFIG.problems.length) console.error(dim(`config.json: ${CONFIG.problems.join("; ")}`))
   if (opt.help || cmd === "help") console.log(HELP)
   else if (!cmd) await cmdPick()
   else if (cmd === "setup") await cmdSetup()

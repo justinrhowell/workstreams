@@ -8,6 +8,7 @@ import matter from "gray-matter"
 // gray-matter caches parses by text and shares the data object; mutating it poisons
 // later reads of identical text. Passing options disables the cache.
 const parseMd = (text) => matter(text, {})
+import { codexDir } from "./paths.mjs"
 import * as store from "./store.mjs"
 import * as summarize from "./summarize.mjs"
 
@@ -85,7 +86,7 @@ function parseCodex(d, info) {
 
 async function codexTitle(sessionId) {
   try {
-    const lines = (await fs.readFile(path.join(os.homedir(), ".codex", "session_index.jsonl"), "utf-8")).trim().split("\n")
+    const lines = (await fs.readFile(path.join(codexDir(), "session_index.jsonl"), "utf-8")).trim().split("\n")
     for (let i = lines.length - 1; i >= 0; i--) {
       const d = JSON.parse(lines[i])
       if (d.id === sessionId) return d.thread_name
@@ -149,7 +150,7 @@ async function findAdoptableManualLog(wsId, started, ended) {
 
 async function writeLogFile(file, data, body) {
   for (const k of Object.keys(data)) if (data[k] == null || (Array.isArray(data[k]) && !data[k].length)) delete data[k]
-  await fs.writeFile(file, matter.stringify(`\n${body.trim()}\n`, data))
+  await store.writeFileAtomic(file, matter.stringify(`\n${body.trim()}\n`, data))
 }
 
 export async function captureSession(args) {
@@ -191,23 +192,10 @@ async function captureSessionInner({ tool, session_id, transcript_path, cwd, rea
   }
 
   if (link) {
-    // A `ws log` written during this run (including a resumed run) wins over refreshing an older entry.
-    const manual = meta.started && (await findAdoptableManualLog(link, meta.started, meta.ended))
-    if (manual) {
-      const { data, content } = parseMd(await fs.readFile(manual.file, "utf-8"))
-      await writeLogFile(manual.file, { ...meta, ...pick(data, ["closed", "added"]), source: "manual+hook" }, content)
-      return { action: "adopted", ws: link, file: manual.file }
-    }
-    const existing = await findSessionLog(link, session_id)
-    if (existing) {
-      // Same session ending again (e.g. after a resume): refresh its own file.
-      const { data, content } = parseMd(await fs.readFile(existing.file, "utf-8"))
-      const files = [...new Set([...(data.files_touched || []), ...meta.files_touched])]
-      await writeLogFile(existing.file, { ...data, ...meta, started: data.started || meta.started, files_touched: files }, content)
-      return { action: "updated", ws: link, file: existing.file, notes: !/^hook$/.test(data.source || "") }
-    }
-    const file = await store.appendLog(link, { ...meta, source: "hook", summary: `(auto) ${t.title || "untitled session"}` })
-    return { action: "linked", ws: link, file, notes: false }
+    // Two sessions ending at once must not both adopt the same manual log: decide under a lock.
+    const logDir = path.join(store.WS_DIR, link, "log")
+    await fs.mkdir(logDir, { recursive: true })
+    return store.withLock(path.join(logDir, ".capture"), () => linkSession(link, meta, session_id, t))
   }
 
   // Inbox: one file per session.
@@ -216,6 +204,26 @@ async function captureSessionInner({ tool, session_id, transcript_path, cwd, rea
   const suggestions = suggest(list, { cwd, title: t.title, files: t.files })
   await writeLogFile(file, { ...meta, suggestions }, t.title || "")
   return { action: "inbox", file, suggestions }
+}
+
+async function linkSession(link, meta, session_id, t) {
+  // A `ws log` written during this run (including a resumed run) wins over refreshing an older entry.
+  const manual = meta.started && (await findAdoptableManualLog(link, meta.started, meta.ended))
+  if (manual) {
+    const { data, content } = parseMd(store.normalizeEol(await fs.readFile(manual.file, "utf-8")))
+    await writeLogFile(manual.file, { ...meta, ...pick(data, ["closed", "added"]), source: "manual+hook" }, content)
+    return { action: "adopted", ws: link, file: manual.file }
+  }
+  const existing = await findSessionLog(link, session_id)
+  if (existing) {
+    // Same session ending again (e.g. after a resume): refresh its own file.
+    const { data, content } = parseMd(store.normalizeEol(await fs.readFile(existing.file, "utf-8")))
+    const files = [...new Set([...(data.files_touched || []), ...meta.files_touched])]
+    await writeLogFile(existing.file, { ...data, ...meta, started: data.started || meta.started, files_touched: files }, content)
+    return { action: "updated", ws: link, file: existing.file, notes: !/^hook$/.test(data.source || "") }
+  }
+  const file = await store.appendLog(link, { ...meta, source: "hook", summary: `(auto) ${t.title || "untitled session"}` })
+  return { action: "linked", ws: link, file, notes: false }
 }
 
 const pick = (o, keys) => Object.fromEntries(keys.filter((k) => k in o).map((k) => [k, o[k]]))

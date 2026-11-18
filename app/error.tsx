@@ -29,6 +29,8 @@ export default function Error({
   }
 
   const handleGoHome = () => {
+    // A full reload is deliberate here: the app is in an error state, so start clean.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
     window.location.href = "/"
   }
 

@@ -1,4 +1,4 @@
-import { writeGuard, originGuard } from "@/lib/ws/route-helpers"
+import { writeGuard, originGuard, readJson } from "@/lib/ws/route-helpers"
 
 const req = (headers: Record<string, string>) =>
   new Request("http://127.0.0.1:3311/api/ws", { method: "POST", headers })
@@ -33,5 +33,31 @@ describe("originGuard", () => {
   it("refuses cross-origin and non-local requests", () => {
     expect(originGuard(req({ host: "127.0.0.1:3311", origin: "http://other:1" }))?.status).toBe(403)
     expect(originGuard(req({ host: "example.com" }))?.status).toBe(403)
+  })
+})
+
+describe("readJson", () => {
+  const get = (headers: Record<string, string>) => new Request("http://127.0.0.1:3311/api/ws", { headers })
+  const data = async () => ({ secret: "prompt text" })
+
+  it("serves local reads", async () => {
+    expect((await readJson(get({ host: "127.0.0.1:3311" }), data)).status).toBe(200)
+  })
+
+  it("refuses DNS-rebinding reads (foreign Host)", async () => {
+    expect((await readJson(get({ host: "attacker.example:3311" }), data)).status).toBe(403)
+  })
+
+  it("refuses cross-origin reads and proxied requests", async () => {
+    expect((await readJson(get({ host: "127.0.0.1:3311", origin: "https://evil.example" }), data)).status).toBe(403)
+    expect((await readJson(get({ host: "localhost:3311", "x-forwarded-for": "203.0.113.9" }), data)).status).toBe(403)
+    expect((await readJson(get({ host: "localhost:3311", "x-forwarded-host": "board.example.com" }), data)).status).toBe(403)
+    expect((await readJson(get({ host: "localhost:3311", forwarded: "for=203.0.113.9" }), data)).status).toBe(403)
+  })
+
+  it("accepts the loopback x-forwarded-* headers Next adds to direct requests", async () => {
+    const h = { host: "127.0.0.1:3311", "x-forwarded-for": "127.0.0.1", "x-forwarded-host": "127.0.0.1:3311", "x-forwarded-port": "3311", "x-forwarded-proto": "http" }
+    expect((await readJson(get(h), data)).status).toBe(200)
+    expect((await readJson(get({ ...h, "x-forwarded-for": "::ffff:127.0.0.1" }), data)).status).toBe(200)
   })
 })

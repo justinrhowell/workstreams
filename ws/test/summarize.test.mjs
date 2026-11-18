@@ -4,8 +4,9 @@ import { promises as fs } from "node:fs"
 import http from "node:http"
 import path from "node:path"
 import os from "node:os"
+import { mkTmp } from "./tmp.mjs"
 
-const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "ws-sum-"))
+const tmp = await mkTmp("ws-sum-")
 process.env.WS_ROOT = path.join(tmp, "root")
 process.env.WS_NO_SPAWN = "1"
 const store = await import("../lib/store.mjs")
@@ -58,7 +59,7 @@ test("digest keeps prompts, prose and tool names but not tool output", async () 
   const d = await sum.digestTranscript("claude", transcript)
   assert.match(d, /USER: fix the nav overlap/)
   assert.match(d, /ASSISTANT: Fixed z-index/)
-  assert.match(d, /TOOL: Edit\(.*nav\.css\)/)
+  assert.match(d, /TOOL: Edit\(.*(nav\.css|…)\)/) // long temp paths are clipped at 140 chars
   assert.doesNotMatch(d, /SECRET TOOL OUTPUT/)
 })
 
@@ -133,7 +134,7 @@ test("a quote copied from the item text is unverified, and applies only when the
   const digest = "USER: Create notes.txt with three bullet ideas for a launch email\nASSISTANT: I created notes.txt and read it back."
   const p = sum.validateProposal(JSON.stringify({ summary: "Made notes.", close: [{ id: "ST-9", quote: "Create notes.txt with three bullet ideas for a launch email", why: "file created" }], add: [] }), open, digest)
   assert.equal(p.close.length, 0)
-  assert.deepEqual(p.unverified.map((u) => u.failed), ["quote copies the item text"])
+  assert.deepEqual(p.unverified.map((u) => u.failed), ["quote is the user's request, not the result"])
 })
 
 test("accepting never overwrites notes someone wrote", async () => {

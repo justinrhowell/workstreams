@@ -80,10 +80,12 @@ jobs:
           done
 
   ws:
-    name: ws CLI, hooks, summarizer, MCP
-    runs-on: ubuntu-latest
+    name: ws CLI, hooks, summarizer, MCP (${{ matrix.os }}, ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         node-version: ['20.x', '22.x']
     defaults:
       run:

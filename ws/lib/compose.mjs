@@ -17,7 +17,7 @@ export function claudeProjectSlug(cwd) {
 }
 
 function memorySlugOf(p) {
-  const m = p.match(/\/\.claude\/projects\/([^/]+)\/memory\//)
+  const m = p.match(/\/projects\/([^/]+)\/memory\//) // ~/.claude or $CLAUDE_CONFIG_DIR
   return m ? m[1] : null
 }
 

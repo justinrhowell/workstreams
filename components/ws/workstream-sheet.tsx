@@ -35,9 +35,10 @@ export function WorkstreamSheet({ id, onClose, onChange, onError }: Props) {
     }
   }, [id, onError])
 
+  // New workstream: clear the old detail, then fetch (after mount, outside the effect body).
   useEffect(() => {
-    setD(null)
-    load()
+    const t = setTimeout(() => { setD(null); load() }, 0)
+    return () => clearTimeout(t)
   }, [load])
 
   async function act(body: Record<string, unknown>, done?: string) {

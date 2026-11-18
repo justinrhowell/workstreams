@@ -136,6 +136,8 @@ Claude Code, in `~/.claude/settings.json`:
 
 Codex, in `~/.codex/hooks.json`: the same shape, with `ws hook codex start` (timeout 10) and `ws hook codex end` (timeout 3). Approve them once with `/hooks` in Codex.
 
+Gemini CLI (hooks only, no MCP registration), in `~/.gemini/settings.json`: the same shape as Claude Code, with `ws hook gemini start` (timeout 10000) and `ws hook gemini end` (timeout 3000); Gemini CLI timeouts are in milliseconds. `ws setup --gemini` does this. The session summary Gemini CLI stores is used as the session title.
+
 Use an absolute path to `ws` if `~/.local/bin` isn't on the PATH those tools see.
 
 MCP server:

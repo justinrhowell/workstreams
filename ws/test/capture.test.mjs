@@ -250,3 +250,27 @@ test("long close notes are clipped in open.md", async () => {
   assert.ok(closed.closed.length < 200)
   assert.match(closed.closed, /…$/)
 })
+
+test("gemini transcript: turns, tool calls, files, summary title; ws hook gemini end captures it", async () => {
+  const f = path.join(tmp, "gemini-chat.jsonl")
+  await fs.writeFile(f, jl(
+    { sessionId: "g1", projectHash: "h", startTime: "2026-11-17T09:00:00Z", lastUpdated: "2026-11-17T09:00:00Z", kind: "main" },
+    { id: "1", timestamp: "2026-11-17T09:00:01Z", type: "user", content: [{ text: "add a footer" }] },
+    { id: "2", timestamp: "2026-11-17T09:00:05Z", type: "gemini", content: "ok", toolCalls: [
+      { id: "t1", name: "write_file", args: { file_path: "/p/footer.tsx", content: "x" } },
+      { id: "t2", name: "run_shell_command", args: { command: "echo hi > /p/out.txt && ws log x" } },
+      { id: "t3", name: "read_file", args: { file_path: "/p/never.txt" } },
+    ] },
+    { id: "3", timestamp: "2026-11-17T09:01:00Z", type: "user", content: [{ text: "thanks" }] },
+    { $set: { summary: "Add footer", lastUpdated: "2026-11-17T09:02:00Z" } },
+  ))
+  const t = await cap.readTranscript("gemini", f, "g1")
+  assert.equal(t.title, "Add footer")
+  assert.equal(t.userTurns, 2)
+  assert.equal(t.toolCalls, 3)
+  assert.deepEqual(t.files.sort(), ["/p/footer.tsx", "/p/out.txt"])
+  assert.equal(t.wsCalls.length, 1)
+  assert.equal(t.started, "2026-11-17T09:00:00Z")
+  assert.equal(t.ended, "2026-11-17T09:02:00Z")
+  assert.equal((await cap.readTranscript("gemini", path.join(tmp, "missing.jsonl"), "x")).userTurns, 0)
+})

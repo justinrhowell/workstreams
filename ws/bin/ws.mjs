@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url"
 
 const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.tildify(store.ROOT)})
 
-  ws setup [--claude] [--codex] [--dry-run] [--no-link] [--no-hooks] [--no-mcp]
+  ws setup [--claude] [--codex] [--gemini] [--dry-run] [--no-link] [--no-hooks] [--no-mcp]
                                    create the data folder, put ws on PATH, add hooks + MCP to Claude Code / Codex
   ws setup --uninstall [--dry-run] remove ws's hooks, MCP entries and CLI link (your data is kept)
   ws                               pick a workstream, then \`go\`
@@ -51,7 +51,7 @@ const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.ti
   ws board --install | --uninstall install/remove the background service (starts at login; 127.0.0.1:3311)
   ws board --rebuild | --status    rebuild after updating ws, then restart; or show service state
   ws board --dev [--port N]        run a dev server in this terminal instead
-  ws hook <claude|codex> <start|end>  hook entry point (reads the hook JSON on stdin; never fails)
+  ws hook <claude|codex|gemini> <start|end>  hook entry point (reads the hook JSON on stdin; never fails)
 `
 
 const { values: opt, positionals: args } = parseArgs({
@@ -59,7 +59,7 @@ const { values: opt, positionals: args } = parseArgs({
   strict: false,
   options: {
     all: { type: "boolean" }, tool: { type: "string" }, inline: { type: "boolean" },
-    "no-copy": { type: "boolean" }, codex: { type: "boolean" }, claude: { type: "boolean" },
+    "no-copy": { type: "boolean" }, codex: { type: "boolean" }, claude: { type: "boolean" }, gemini: { type: "boolean" },
     resume: { type: "boolean" }, title: { type: "string" }, cwd: { type: "string" },
     group: { type: "string" }, prefix: { type: "string" }, waiting: { type: "string" },
     session: { type: "string" }, force: { type: "boolean" }, drain: { type: "boolean" }, quiet: { type: "boolean" },
@@ -571,7 +571,7 @@ async function cmdBoard() {
 async function cmdSetup() {
   // Loaded only here, so nothing in setup can affect hooks or other commands.
   const { runSetup, runUninstall, detectTools } = await import("../lib/setup.mjs")
-  const tools = await detectTools({ claude: opt.claude, codex: opt.codex })
+  const tools = await detectTools({ claude: opt.claude, codex: opt.codex, gemini: opt.gemini })
   if (opt.uninstall) {
     const { problems } = await runUninstall({ tools, dryRun: opt["dry-run"] })
     if (problems.length) die(`\nNot everything was removed:\n  ${problems.join("\n  ")}`)
@@ -609,7 +609,7 @@ async function cmdHook(tool, event) {
 // Options that only mean something to one command; anything else is an error there,
 // so `ws setup --unistall` (typo) or `ws board --dry-run` doesn't silently do the default.
 const ONLY = {
-  setup: ["claude", "codex", "dry-run", "no-link", "no-hooks", "no-mcp", "uninstall", "help"],
+  setup: ["claude", "codex", "gemini", "dry-run", "no-link", "no-hooks", "no-mcp", "uninstall", "help"],
   board: ["install", "uninstall", "rebuild", "status", "dev", "port", "no-open", "help"],
 }
 
@@ -649,7 +649,7 @@ try {
   else if (cmd === "stale") await cmdStale()
   else if (cmd === "mirror") await cmdMirror(rest[0], rest[1])
   else if (cmd === "inbox") await cmdInbox(rest[0], rest[1], rest[2], rest.slice(3))
-  else if (cmd === "hook") await cmdHook(need(rest[0], "claude|codex"), need(rest[1], "start|end"))
+  else if (cmd === "hook") await cmdHook(need(rest[0], "claude|codex|gemini"), need(rest[1], "start|end"))
   else die(`unknown command "${cmd}"\n\n${HELP}`)
 } catch (e) {
   die(`ws: ${e.message}`)

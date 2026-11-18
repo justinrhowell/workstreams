@@ -289,3 +289,19 @@ test("E2E: an equivalent hand-written hook ($HOME, ~, the link's target) is left
   assert.equal(S.sameHook("/elsewhere/ws hook codex start", "codex", "start", opts), false)
   assert.equal(S.sameHook("WS_ROOT=/other ~/.local/bin/ws hook codex start", "codex", "start", opts), false)
 })
+
+test("gemini: hooks go to ~/.gemini/settings.json with millisecond timeouts; no MCP step", async () => {
+  const { home, env } = await fakeHome("home-gemini")
+  const lines = []
+  const r = await runSetup({ tools: ["gemini"], link: false, env, log: (s) => lines.push(s) })
+  assert.deepEqual(r.problems, [])
+  const file = path.join(home, ".gemini", "settings.json")
+  assert.equal(settingsFile("gemini", env), file)
+  const s = JSON.parse(await fs.readFile(file, "utf-8"))
+  assert.deepEqual(s.hooks.SessionStart[0].hooks[0], { type: "command", command: hookCommand("gemini", "start", { wsPath: BIN, root: store.ROOT, home }), timeout: 10_000 })
+  assert.equal(s.hooks.SessionEnd[0].hooks[0].timeout, 3000)
+  assert.ok(!lines.some((l) => l.includes("MCP")))
+  const merged = mergeHooks({}, "gemini", DEF).settings
+  assert.match(merged.hooks.SessionEnd[0].hooks[0].command, /ws hook gemini end$/)
+  assert.deepEqual(removeHooks(merged, "gemini").settings, {})
+})

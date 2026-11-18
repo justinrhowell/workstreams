@@ -8,7 +8,7 @@ import path from "node:path"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
 import * as store from "./store.mjs"
-import { claudeDir, codexDir } from "./paths.mjs"
+import { claudeDir, codexDir, geminiDir } from "./paths.mjs"
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 export const BIN = path.join(PKG, "bin", "ws.mjs")
@@ -16,11 +16,17 @@ export const MCP = path.join(PKG, "mcp", "server.mjs")
 
 // Seconds. Codex waits on SessionEnd before exiting, so its end hook stays short;
 // heavy work (the summarizer) is always detached.
-const TIMEOUTS = { claude: { start: 10, end: 20 }, codex: { start: 10, end: 3 } }
+// Gemini CLI takes hook timeouts in milliseconds.
+const TIMEOUTS = { claude: { start: 10, end: 20 }, codex: { start: 10, end: 3 }, gemini: { start: 10_000, end: 3000 } }
 const EVENTS = { start: "SessionStart", end: "SessionEnd" }
 
 export const settingsFile = (tool, env = process.env) =>
-  tool === "claude" ? path.join(claudeDir(env), "settings.json") : path.join(codexDir(env), "hooks.json")
+  tool === "claude" ? path.join(claudeDir(env), "settings.json")
+    : tool === "gemini" ? path.join(geminiDir(env), "settings.json")
+    : path.join(codexDir(env), "hooks.json")
+
+// Gemini CLI: hooks only (ws has no MCP registration for it yet).
+const hasMcp = (tool) => tool !== "gemini"
 
 // POSIX shell quoting for hook commands (Claude Code and Codex run them through sh).
 const q = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${String(s).replace(/'/g, `'\\''`)}'`)
@@ -177,11 +183,12 @@ const runs = (cmd, args = ["--version"], env = process.env) => {
 const exists = (p) => fs.access(p).then(() => true, () => false)
 
 // Which tools to set up: explicit flags win; otherwise every tool that's installed.
-export async function detectTools({ claude, codex, env = process.env } = {}) {
-  if (claude || codex) return [claude && "claude", codex && "codex"].filter(Boolean)
+export async function detectTools({ claude, codex, gemini, env = process.env } = {}) {
+  if (claude || codex || gemini) return [claude && "claude", codex && "codex", gemini && "gemini"].filter(Boolean)
   const out = []
   if (runs("claude", undefined, env) || (await exists(claudeDir(env)))) out.push("claude")
   if (runs("codex", undefined, env) || (await exists(codexDir(env)))) out.push("codex")
+  if (runs("gemini", undefined, env) || (await exists(geminiDir(env)))) out.push("gemini")
   return out
 }
 
@@ -332,7 +339,7 @@ export async function runSetup({ tools, link = true, hooks = true, mcp = true, d
 
   // 4. MCP server: add, or replace a ws registration that points somewhere else.
   if (mcp) {
-    for (const tool of tools) {
+    for (const tool of tools.filter(hasMcp)) {
       const add = mcpAddCommand(tool, root, pin, env)
       const shown = add.map(q).join(" ")
       if (!runs(tool, undefined, env)) { log(`${tool} MCP: \`${tool}\` not found on PATH; run later:\n  ${shown}`); continue }
@@ -377,6 +384,7 @@ export async function runUninstall({ tools, dryRun = false, env = process.env, l
       }
     } catch (e) { problems.push(`${tool} hooks: ${e.message}`); log(`${tool} hooks: ${e.message}`) }
 
+    if (!hasMcp(tool)) continue
     if (!runs(tool, undefined, env)) { log(`${tool} MCP: \`${tool}\` not found; if registered, remove with: ${mcpRemoveCommand(tool).join(" ")}`); continue }
     const cur = currentMcp(tool, env)
     if (!cur) log(`${tool} MCP: not registered`)

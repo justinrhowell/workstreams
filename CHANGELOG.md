@@ -1,0 +1,26 @@
+# Changelog
+
+All notable changes to ws. Versions follow [semantic versioning](https://semver.org); until 1.0, minor versions may change behaviour.
+
+## 0.1.0 — 2026-11-18
+
+First public release.
+
+### What ws does
+- **Workstreams** with open items (stable IDs like `AS-3`, and who each waits on), decisions (superseded, never edited), a log with one file per session, and pointers to your project's own docs.
+- **Resume prompts** built fresh from that state: `ws prompt`, or `ws go` to edit the prompt and launch Claude Code or Codex in the workstream's folder.
+- **Automatic capture:** SessionStart/SessionEnd hooks tell each session which workstream it's in and log it when it ends. Sessions in unclaimed folders go to an inbox.
+- **MCP server** so Claude Code and Codex can read and update workstreams directly.
+- **Optional summarizer:** an OpenAI-compatible model (self-hosted or hosted) drafts notes for sessions that ended without any. Nothing applies until you accept it, and closes must quote the session's own result.
+- **Board:** a local web view (Next.js, 127.0.0.1 only) with status columns, staleness, inbox and review.
+
+### Setup and configuration
+- `ws setup` adds the hooks and MCP registration for Claude Code and Codex, and `ws setup --uninstall` removes them. It's safe to re-run: it only changes entries that are entirely ws's own, keeps timestamped backups, and leaves equivalent hand-written hooks alone.
+- Data lives in `$WS_ROOT` (default `$XDG_DATA_HOME/ws` or `~/.local/share/ws`), never in the repo. Settings are in `config.json`, validated, and documented in `docs/CONFIGURATION.md`.
+- Supported on macOS and Linux. On Windows, use WSL.
+
+### Safety
+- Atomic writes that keep file permissions and follow symlinks. A file ws can't fully parse blocks writes (naming the line) instead of losing records.
+- Locks with owner tokens and heartbeats; accepting a proposal is exclusive and can be resumed after an interruption.
+- Secrets are redacted before anything is sent to a model. The board refuses cross-origin, DNS-rebinding and proxied requests.
+- CI: tests on Ubuntu and macOS with Node 20 and 22, CodeQL, and an enforced audit of runtime dependencies.

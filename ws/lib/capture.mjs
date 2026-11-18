@@ -28,6 +28,7 @@ export async function readTranscript(tool, transcriptPath, sessionId) {
   const info = { title: null, started: null, ended: null, userTurns: 0, toolCalls: 0, files: new Set(), wsCalls: [], interactive: true }
   let text = ""
   try { text = await fs.readFile(transcriptPath, "utf-8") } catch { return finish(info) }
+  if (tool === "gemini") { parseGemini(text, info); return finish(info) }
   for (const line of text.split("\n")) {
     if (!line) continue
     let d
@@ -91,6 +92,40 @@ function parseCodex(d, info) {
     for (const m of input.matchAll(PATCH_RE)) info.files.add(m[1].trim())
     shellWrites(input, info.files)
     if (/\bws (item|log)\b/.test(input)) info.wsCalls.push(input.slice(0, 200))
+  }
+}
+
+// Gemini CLI chat files: append-only JSONL (older versions wrote one JSON document). A line is
+// metadata ({sessionId, startTime, summary, ...}), a message ({id, timestamp, type: "user"|"gemini",
+// toolCalls: [{name, args}]}), or an update ({$set: {...}}, {$rewindTo}, {$patch}). Updates other
+// than $set are ignored, so a rewound conversation can be over-counted; the capture heuristics
+// only need rough totals.
+const GEMINI_EDIT_TOOLS = /^(write_file|replace|edit)$/
+function parseGemini(text, info) {
+  const docs = []
+  const whole = (() => { try { return JSON.parse(text) } catch { return null } })()
+  if (whole && Array.isArray(whole.messages)) docs.push({ ...whole, messages: undefined }, ...whole.messages)
+  else for (const line of text.split("\n")) { try { if (line) docs.push(JSON.parse(line)) } catch {} }
+  for (const d of docs) {
+    if (d.startTime) info.started ??= d.startTime
+    const set = d.$set || d
+    if (typeof set.summary === "string" && set.summary) info.title = set.summary
+    if (set.lastUpdated) info.ended = set.lastUpdated
+    if (d.timestamp) { info.started ??= d.timestamp; info.ended = d.timestamp }
+    if (d.type === "user") info.userTurns++
+    if (d.type !== "gemini" || !Array.isArray(d.toolCalls)) continue
+    for (const c of d.toolCalls) {
+      info.toolCalls++
+      const name = String(c.name || "")
+      if (/^mcp_ws_ws_(item_|log|set_status)/.test(name)) info.wsCalls.push(name)
+      const fp = c.args?.file_path
+      if (fp && GEMINI_EDIT_TOOLS.test(name)) info.files.add(fp)
+      if (name === "run_shell_command") {
+        const cmd = c.args?.command || ""
+        shellWrites(cmd, info.files)
+        if (/\bws (item|log)\b/.test(cmd)) info.wsCalls.push(cmd)
+      }
+    }
   }
 }
 

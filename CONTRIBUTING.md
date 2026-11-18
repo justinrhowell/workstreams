@@ -44,7 +44,7 @@ These come from the design in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Plea
 ## Good first contributions
 
 - A systemd user unit for `ws board --install` on Linux (today it's launchd only)
-- Hook support for other agent CLIs that have session start/end hooks
+- Hook support for more agent CLIs that have session start/end hooks (Gemini CLI is covered)
 - Windows testing and fixes
 - Board accessibility and keyboard navigation
 

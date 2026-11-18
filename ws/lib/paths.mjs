@@ -9,6 +9,10 @@ export function claudeDir(env = process.env) {
   return env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : path.join(home(env), ".claude")
 }
 
+export function geminiDir(env = process.env) {
+  return path.join(home(env), ".gemini")
+}
+
 export function codexDir(env = process.env) {
   return env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(home(env), ".codex")
 }

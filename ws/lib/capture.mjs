@@ -1,6 +1,6 @@
 // Automatic capture (docs/ARCHITECTURE.md, "Capture"): link ended sessions to workstreams, or
 // park them in the inbox. No LLM; reads only the transcript the hook points at.
-import { promises as fs } from "node:fs"
+import { promises as fs, realpathSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import matter from "gray-matter"
@@ -97,16 +97,42 @@ async function codexTitle(sessionId) {
 
 // --------------------------------------------------------------------- matching
 
-const under = (child, parent) => child === parent || child.startsWith(parent.endsWith("/") ? parent : parent + "/")
+// Folders are compared by their real path: Claude Code and Codex report the resolved cwd
+// (/private/tmp/x on macOS) while a workstream may name it through a symlink (/tmp/x,
+// a symlinked ~/code). A path that no longer exists resolves through its nearest
+// existing parent.
+const canonCache = new Map()
+export function canon(p) {
+  if (!p) return p
+  const abs = path.resolve(store.expand(p))
+  if (canonCache.has(abs)) return canonCache.get(abs)
+  let head = abs, tail = ""
+  let out = abs
+  for (;;) {
+    try { out = path.join(realpathSync.native(head), tail); break } catch {}
+    const up = path.dirname(head)
+    if (up === head) break
+    tail = path.join(path.basename(head), tail)
+    head = up
+  }
+  canonCache.set(abs, out)
+  return out
+}
+
+const under = (child, parent) => {
+  const c = canon(child), p = canon(parent)
+  return c === p || c.startsWith(p.endsWith("/") ? p : p + "/")
+}
 
 // Auto-link only on WS_ID or exactly one claimant at the longest cwd prefix.
 export function matchWorkstream(list, cwd, wsId) {
   if (wsId && list.some((w) => w.id === wsId)) return { link: wsId, candidates: [wsId] }
   const live = list.filter((w) => w.cwd && ["active", "waiting"].includes(w.status) && under(cwd, w.cwd))
   if (!live.length) return { link: null, candidates: [] }
-  const best = Math.max(...live.map((w) => w.cwd.length))
-  const top = live.filter((w) => w.cwd.length === best)
-  return { link: top.length === 1 ? top[0].id : null, candidates: live.sort((a, b) => b.cwd.length - a.cwd.length).map((w) => w.id) }
+  const len = (w) => canon(w.cwd).length
+  const best = Math.max(...live.map(len))
+  const top = live.filter((w) => len(w) === best)
+  return { link: top.length === 1 ? top[0].id : null, candidates: live.sort((a, b) => len(b) - len(a)).map((w) => w.id) }
 }
 
 // Ranked guesses for inbox rows.

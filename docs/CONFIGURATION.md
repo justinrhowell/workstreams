@@ -49,7 +49,7 @@ To keep the data in a synced or backed-up folder, point `WS_ROOT` there or symli
 - each tool call's name and the first 140 characters of its main argument: shell commands, file paths, URLs, search patterns,
 - the workstream's title, open items and active decisions.
 
-Tool output is never sent. Common credential shapes (API keys, GitHub and Slack tokens, AWS keys, JWTs, `Bearer …`, `password=…`, `user:pass@` in URLs, private keys) are replaced with `[redacted]` before sending. That is a safety net, not a guarantee: a secret in an unusual format can still get through. With a self-hosted model nothing leaves your machine. With a hosted API, this digest goes to the provider. Leave `llm.url` unset to keep the summarizer off.
+Tool output is never sent. Common credential shapes, in the digest and in titles, items and decisions, (API keys, GitHub and Slack tokens, AWS keys, JWTs, `Bearer …`, `password=…`, `user:pass@` in URLs, private keys) are replaced with `[redacted]` before sending. That is a safety net, not a guarantee: a secret in an unusual format can still get through. If `llm.url` points at this machine (`localhost`, `127.0.0.1`), nothing leaves it. A self-hosted model on another machine (a home server, a GPU box on your network) receives the request over the network, so use `https` or a network you trust. A hosted API receives it as its provider's data. Leave `llm.url` unset to keep the summarizer off.
 
 **Validation:** ws checks every value. A wrong type or an unsafe value is ignored, and commands print a one-line `config.json:` note saying what was ignored. A broken file never stops hooks.
 
@@ -113,8 +113,8 @@ sources:                  # read-first docs for the resume prompt
 ## Uninstalling
 
 ```bash
-ws setup --uninstall            # add --dry-run to preview
-ws board --uninstall            # macOS, if you installed the background service
+ws board --uninstall            # first, on macOS, if you installed the background service
+ws setup --uninstall            # then this (add --dry-run to preview); it removes the ws command
 ```
 
 This removes ws's own hook entries (custom hooks are kept), the `ws` MCP registrations, and the `~/.local/bin/ws` link. Each settings file it changes is backed up first. Your data folder is left alone; delete it yourself if you want it gone.

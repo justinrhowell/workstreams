@@ -6,6 +6,14 @@ import { ROOT } from "./store.mjs"
 
 export const CONFIG_FILE = path.join(ROOT, "config.json")
 
+function isHttpUrl(v) {
+  if (typeof v !== "string" || /\s/.test(v)) return false
+  try {
+    const u = new URL(v)
+    return (u.protocol === "http:" || u.protocol === "https:") && !!u.hostname
+  } catch { return false }
+}
+
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v)
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -21,7 +29,7 @@ export function validateConfig(raw) {
     else {
       const l = raw.llm
       if (l.url !== undefined) {
-        if (typeof l.url === "string" && /^https?:\/\/[^\s]+$/.test(l.url)) out.llm.url = l.url
+        if (isHttpUrl(l.url)) out.llm.url = l.url
         else problems.push("llm.url must be an http(s) URL")
       }
       if (l.model !== undefined) {
@@ -52,7 +60,8 @@ export function validateConfig(raw) {
     else {
       const b = raw.board
       if (b.port !== undefined) {
-        const n = Number(b.port)
+        // A number, or a string of digits; never true, [3311] or "3e3".
+        const n = typeof b.port === "number" ? b.port : typeof b.port === "string" && /^\d+$/.test(b.port) ? Number(b.port) : NaN
         if (Number.isInteger(n) && n >= 1 && n <= 65535) out.board.port = n
         else problems.push("board.port must be an integer between 1 and 65535")
       }

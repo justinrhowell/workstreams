@@ -83,7 +83,8 @@ export async function enqueue({ ws, session, tool, transcript, log }) {
   const file = path.join(QUEUE_DIR, `${store.sessionTag(session)}.json`)
   // token: a drainer that finished an older copy of this job must not delete a newer one.
   const job = { ws, session, tool, transcript: store.expand(transcript), log, attempts: 0, queued: new Date().toISOString(), token: Math.random().toString(36).slice(2) }
-  await store.writeFileAtomic(file, JSON.stringify(job, null, 2))
+  // Same lock the drainer holds while it checks and updates this job.
+  await store.withLock(file, () => store.writeFileAtomic(file, JSON.stringify(job, null, 2)))
   return file
 }
 
@@ -154,11 +155,16 @@ export function redact(text) {
 
 function toolHint(name, input = {}) {
   const h = input.file_path || input.notebook_path || input.command || input.pattern || input.url || input.description || ""
-  return `${name}${h ? `(${clip(String(h).replace(/\s+/g, " "), 140)})` : ""}`
+  // Redact before clipping, so a secret cut at the 140-character mark can't slip through half-matched.
+  return `${name}${h ? `(${clip(redact(String(h)).replace(/\s+/g, " "), 140)})` : ""}`
 }
 
 // User prompts, assistant prose, tool names and the first 140 characters of each tool's
 // main argument (command, file path, URL, pattern). No tool output or images.
+// One line per turn: newlines inside a message are flattened, so a continuation line of a
+// user message can never be mistaken for assistant or tool text.
+const turn = (who, text, n) => `${who}: ${clip(redact(String(text)).replace(/\s*[\r\n]+\s*/g, " ").trim(), n)}`
+
 export async function digestTranscript(tool, file) {
   const raw = await fs.readFile(file, "utf-8")
   const lines = []
@@ -170,14 +176,14 @@ export async function digestTranscript(tool, file) {
       if (d.isSidechain || d.isMeta) continue
       const c = d.message?.content
       if (d.type === "user") {
-        if (typeof c === "string") lines.push(`USER: ${clip(c, 2000)}`)
+        if (typeof c === "string") lines.push(turn("USER", c, 2000))
         else if (Array.isArray(c) && !c.some((x) => x.type === "tool_result")) {
           const t = c.filter((x) => x.type === "text").map((x) => x.text).join(" ")
-          if (t) lines.push(`USER: ${clip(t, 2000)}`)
+          if (t) lines.push(turn("USER", t, 2000))
         }
       } else if (d.type === "assistant" && Array.isArray(c)) {
         for (const x of c) {
-          if (x.type === "text" && x.text.trim()) lines.push(`ASSISTANT: ${clip(x.text.trim(), 1500)}`)
+          if (x.type === "text" && x.text.trim()) lines.push(turn("ASSISTANT", x.text, 1500))
           if (x.type === "tool_use") lines.push(`TOOL: ${toolHint(x.name, x.input)}`)
         }
       }
@@ -185,10 +191,10 @@ export async function digestTranscript(tool, file) {
       const p = d.payload || {}
       if (p.type === "message" && p.role === "user") {
         const t = (p.content || []).map((x) => x.text || "").join(" ")
-        if (t && !t.startsWith("<environment_context>")) lines.push(`USER: ${clip(t, 2000)}`)
+        if (t && !t.startsWith("<environment_context>")) lines.push(turn("USER", t, 2000))
       } else if (p.type === "message" && p.role === "assistant") {
         const t = (p.content || []).map((x) => x.text || "").join(" ").trim()
-        if (t) lines.push(`ASSISTANT: ${clip(t, 1500)}`)
+        if (t) lines.push(turn("ASSISTANT", t, 1500))
       } else if (p.type === "item_completed" && p.item?.type === "McpToolCall") {
         lines.push(`TOOL: ${p.item.server}.${p.item.tool}`)
       } else if (p.type === "custom_tool_call" || p.type === "function_call") {
@@ -261,9 +267,10 @@ export async function callModel(cfg, ws, openItems, digest, decided = []) {
     `DECIDED:\n${decided.map((d) => `${d.id} ${d.text}`).join("\n") || "(none)"}`,
     `SESSION DIGEST:\n${digest}`,
   ].join("\n\n")
+  const content = redact(user) // titles, items and decisions too, not just the digest
   // extraBody can add or override request options (null removes one, e.g. max_tokens for
   // providers that want max_completion_tokens) but never the model or the messages.
-  const body = { temperature: 0.2, max_tokens: 1500, response_format: { type: "json_object" }, ...cfg.extraBody, model, messages: [{ role: "system", content: SYSTEM }, { role: "user", content: user }] }
+  const body = { temperature: 0.2, max_tokens: 1500, response_format: { type: "json_object" }, ...cfg.extraBody, model, messages: [{ role: "system", content: SYSTEM }, { role: "user", content }] }
   for (const k of Object.keys(body)) if (body[k] === null) delete body[k]
   const res = await fetch(`${cfg.url}/chat/completions`, {
     method: "POST",
@@ -320,11 +327,12 @@ function overlap(a, b) {
 export function validateProposal(raw, openItems, digest = null, decided = []) {
   let p
   try { p = JSON.parse(String(raw).replace(/^```(?:json)?\s*|\s*```$/g, "")) } catch { throw new Error("model output is not JSON") }
-  const openIds = new Set(openItems.map((i) => i.id))
+  // Legacy data may have lowercase prefixes; compare IDs case-insensitively everywhere.
+  const openIds = new Set(openItems.map((i) => i.id.toUpperCase()))
   const str = (v) => (typeof v === "string" ? v.trim() : "")
   const summary = str(p.summary)
   if (!summary) throw new Error("empty summary")
-  const byId = new Map(openItems.map((i) => [i.id, i]))
+  const byId = new Map(openItems.map((i) => [i.id.toUpperCase(), i]))
   // A close is evidence of work done, so it must quote the assistant or a tool, never the
   // user's request. A decision is the user's, so it must quote the user.
   const linesOf = (pred) => norm(String(digest).split("\n").filter(pred).join("\n"))
@@ -382,7 +390,11 @@ export function validateProposal(raw, openItems, digest = null, decided = []) {
 
 export async function processJob(job, cfg) {
   let ws
-  try { ws = await store.getWorkstream(job.ws) } catch { return { skipped: "workstream no longer exists" } }
+  try { ws = await store.getWorkstream(job.ws) } catch (e) {
+    // Only a missing workstream drops the job; unreadable files are errors to retry.
+    if (/^No workstream/.test(e.message)) return { skipped: "workstream no longer exists" }
+    throw e
+  }
   const openItems = (await store.readOpen(job.ws)).items.filter((i) => !i.done)
   const decided = (await store.readDecisions(job.ws)).decisions.filter((d) => d.active)
   const digest = await digestTranscript(job.tool, job.transcript)
@@ -393,21 +405,43 @@ export async function processJob(job, cfg) {
   await fs.mkdir(dir, { recursive: true })
   const file = path.join(dir, `${store.sessionTag(job.session)}.md`)
   const data = { ws: job.ws, session: job.session, tool: job.tool, log: job.log, model, created: new Date().toISOString(), close: proposal.close, add: proposal.add, unverified: proposal.unverified, decide: proposal.decide }
-  // Deleted while the model was working: don't recreate its proposals.
+  // Deleted while the model was working, or the job was re-queued (a newer session end):
+  // don't publish this generation's proposal.
   if (!(await fs.access(ws.file).then(() => true, () => false))) return { skipped: "workstream deleted during summary" }
-  await store.writeFileAtomic(file, matter.stringify(`\n${proposal.summary}\n`, data))
+  const publish = async () => {
+    if (job.file && job.token && !(await sameJob(job))) return false
+    await store.writeFileAtomic(file, matter.stringify(`\n${proposal.summary}\n`, data))
+    return true
+  }
+  const published = job.file ? await store.withLock(job.file, publish) : await publish()
+  if (!published) return { skipped: "job was re-queued; the newer run will draft it" }
   return { file, proposal }
 }
 
 // The drain lock is refreshed before every job; it's stale only after a full model
 // timeout (plus slack) with no sign of life.
-async function takeDrainLock(lock, cfg) {
+// The drain lock holds its owner's token and is refreshed every few seconds while the
+// drain runs, so a live drain is never taken over; one untouched for a model timeout plus
+// slack is stale. Takeover is a rename (one winner); release checks the token.
+async function takeDrainLock(lock, cfg, token) {
   await fs.mkdir(QUEUE_DIR, { recursive: true })
-  try { await fs.mkdir(lock); return true } catch {}
+  const claim = async () => {
+    try { await fs.mkdir(lock) } catch { return false }
+    await fs.writeFile(path.join(lock, "owner"), token)
+    return true
+  }
+  if (await claim()) return true
   const staleMs = Math.max(15 * 60_000, 2 * cfg.timeoutMs + 60_000)
   try { if (Date.now() - (await fs.stat(lock)).mtimeMs < staleMs) return false } catch {}
-  await fs.rm(lock, { recursive: true, force: true })
-  try { await fs.mkdir(lock); return true } catch { return false }
+  try { await fs.rename(lock, `${lock}.stale-${token}`) } catch { return false }
+  await fs.rm(`${lock}.stale-${token}`, { recursive: true, force: true })
+  return claim()
+}
+
+async function releaseDrainLock(lock, token) {
+  let mine = false
+  try { mine = (await fs.readFile(path.join(lock, "owner"), "utf-8")) === token } catch {}
+  if (mine) await fs.rm(lock, { recursive: true, force: true })
 }
 
 // Re-read the job file: if it was re-queued (new token) while we worked, leave it.
@@ -419,17 +453,19 @@ export async function drain({ log = () => {} } = {}) {
   const cfg = await llmConfig()
   if (!cfg) return { done: 0, failed: 0, note: "no llm configured" }
   const lock = path.join(QUEUE_DIR, ".drain.lock")
-  if (!(await takeDrainLock(lock, cfg))) return { done: 0, failed: 0, note: "another drain is running" }
+  const token = `${process.pid}-${Math.random().toString(36).slice(2)}`
+  if (!(await takeDrainLock(lock, cfg, token))) return { done: 0, failed: 0, note: "another drain is running" }
+  const beat = setInterval(() => { const t = new Date(); fs.utimes(lock, t, t).catch(() => {}) }, 5_000)
+  beat.unref?.()
   let done = 0, failed = 0
   try {
     const up = await endpointStatus(cfg)
     if (!up.ok) return { done, failed, note: `model endpoint ${up.why}; queue kept` }
     for (const job of await listQueue()) {
-      const now = new Date()
-      await fs.utimes(lock, now, now).catch(() => {})
       try {
         const r = await processJob(job, cfg)
-        if (await sameJob(job)) await fs.rm(job.file, { force: true })
+        // Check-and-remove under the job's lock, so a re-queue can't land in between.
+        await store.withLock(job.file, async () => { if (await sameJob(job)) await fs.rm(job.file, { force: true }) })
         done++
         log(`${job.ws} ${store.sessionTag(job.session)}: ${r.skipped || "proposal written"}`)
       } catch (e) {
@@ -438,7 +474,8 @@ export async function drain({ log = () => {} } = {}) {
         if (!isTransient) job.attempts = (job.attempts || 0) + 1
         job.lastError = redact(String(e.message || e)).slice(0, 300)
         const { file, ...rest } = job
-        if (await sameJob(job)) {
+        await store.withLock(file, async () => {
+          if (!(await sameJob(job))) return
           if (job.attempts >= MAX_ATTEMPTS) {
             await fs.mkdir(path.join(QUEUE_DIR, "failed"), { recursive: true })
             await store.writeFileAtomic(path.join(QUEUE_DIR, "failed", path.basename(file)), JSON.stringify(rest, null, 2))
@@ -446,13 +483,14 @@ export async function drain({ log = () => {} } = {}) {
           } else {
             await store.writeFileAtomic(file, JSON.stringify(rest, null, 2))
           }
-        }
+        })
         log(`${job.ws} ${store.sessionTag(job.session)}: failed (${job.lastError})`)
         if (isTransient) break // endpoint or config trouble: stop, retry later without charging other jobs
       }
     }
   } finally {
-    await fs.rm(lock, { recursive: true, force: true })
+    clearInterval(beat)
+    await releaseDrainLock(lock, token)
   }
   return { done, failed }
 }
@@ -465,72 +503,113 @@ export async function listProposals(wsId) {
   try { dirs = wsId ? [wsId] : await fs.readdir(PROPOSALS_DIR) } catch { return [] }
   for (const d of dirs) {
     let files = []
-    try { files = (await fs.readdir(path.join(PROPOSALS_DIR, d))).filter((f) => f.endsWith(".md")).sort() } catch { continue }
+    // ".md.accepting" is an accept that was interrupted: listed so it can be finished.
+    try { files = (await fs.readdir(path.join(PROPOSALS_DIR, d))).filter((f) => f.endsWith(".md") || f.endsWith(".md.accepting")).sort() } catch { continue }
     for (const f of files) {
       const file = path.join(PROPOSALS_DIR, d, f)
-      const { data, content } = parseMd(await fs.readFile(file, "utf-8"))
-      out.push({ file, ...data, summary: content.trim() })
+      let text
+      try { text = await fs.readFile(file, "utf-8") } catch { continue } // accepted meanwhile
+      const { data, content } = parseMd(store.normalizeEol(text))
+      out.push({ file, ...data, summary: content.trim(), ...(f.endsWith(".accepting") ? { interrupted: true } : {}) })
     }
   }
   return out.sort((a, b) => String(a.created).localeCompare(String(b.created)))
 }
 
+// Accepting is exclusive and safe to retry:
+// - the proposal is claimed by hard-linking it to <file>.accepting (fails if anyone else
+//   already claimed it), and the claimed copy must be the one the reviewer selected;
+// - each step (a decision, a close, an add, the summary) is recorded in the claimed file
+//   as it lands, so if the process dies or a step fails partway, accepting again finishes
+//   the remaining steps instead of applying the done ones twice.
 export async function acceptProposal(p, opts = {}) {
-  // Claim the proposal first (rename is atomic): two accepts of the same proposal, from
-  // the CLI and the board at once, can't both apply it.
-  const claimed = `${p.file}.accepting`
-  try { await fs.rename(p.file, claimed) } catch (e) {
-    if (e.code === "ENOENT") throw new Error("This proposal was already accepted or rejected")
-    throw e
+  const resuming = p.file.endsWith(".accepting")
+  const claimed = resuming ? p.file : `${p.file}.accepting`
+  if (!resuming) {
+    try { await fs.link(p.file, claimed) } catch (e) {
+      if (e.code === "EEXIST") throw new Error("This proposal is already being accepted; if that was interrupted, accept it again from `ws review`")
+      if (e.code === "ENOENT") throw new Error("This proposal was already accepted or rejected")
+      throw e
+    }
+    await fs.rm(p.file, { force: true })
   }
-  try {
-    return await applyProposal({ ...p, file: claimed }, opts)
-  } catch (e) {
-    await fs.rename(claimed, p.file).catch(() => {})
-    throw e
-  }
+  return store.withLock(claimed, async () => {
+    let cur
+    try { cur = parseMd(store.normalizeEol(await fs.readFile(claimed, "utf-8"))) } catch (e) {
+      if (e.code === "ENOENT") throw new Error("This proposal was already accepted")
+      throw e
+    }
+    if (cur.data.session !== p.session || String(cur.data.created) !== String(p.created)) {
+      throw new Error("The proposal changed since you opened it; review it again")
+    }
+    const done = new Set(cur.data.applied_steps || [])
+    const step = async (key, fn) => {
+      if (done.has(key)) return
+      await fn()
+      done.add(key)
+      cur.data.applied_steps = [...done]
+      await store.writeFileAtomic(claimed, matter.stringify(`\n${cur.content.trim()}\n`, cur.data))
+    }
+    try {
+      // Apply what the claimed file says (identity checked above), not a possibly stale listing.
+      const applied = await applyProposal({ ...cur.data, summary: cur.content.trim(), file: claimed }, opts, step)
+      await fs.rm(claimed, { force: true })
+      return applied
+    } catch (e) {
+      throw new Error(`${e.message}. Steps that finished are recorded; accept again to finish the rest.`)
+    }
+  })
 }
 
-async function applyProposal(p, { close = true, add = true, summary = true, unverified = [], decide = true, confirmDecisions = [] } = {}) {
+async function applyProposal(p, { close = true, add = true, summary = true, unverified = [], decide = true, confirmDecisions = [] } = {}, step) {
   const applied = { closed: [], added: [], decided: [], skipped: [] }
   // Verified decisions apply with `decide`; unverified ones only when confirmed by index.
   for (const [i, d] of (p.decide || []).entries()) {
     if (d.unverified ? !confirmDecisions.includes(i) : !decide) continue
-    try {
-      const r = await store.decide(p.ws, d.text, { why: d.why || undefined, rejected: d.rejected, evidence: d.quote ? `"${d.quote}"` : undefined, session: p.session })
-      applied.decided.push(r.decision.id)
-    } catch (e) { applied.skipped.push(`decision: ${e.message}`) }
+    await step(`decide:${i}`, async () => {
+      try {
+        const r = await store.decide(p.ws, d.text, { why: d.why || undefined, rejected: d.rejected, evidence: d.quote ? `"${d.quote}"` : undefined, session: p.session })
+        applied.decided.push(r.decision.id)
+      } catch (e) { applied.skipped.push(`decision: ${e.message}`) }
+    })
   }
   // Unverified closes apply only when the reviewer ticks them, by ID.
   for (const id of unverified) {
-    const u = (p.unverified || []).find((x) => x.id === id)
+    const u = (p.unverified || []).find((x) => x.id.toUpperCase() === String(id).toUpperCase())
     if (!u) continue
-    try { applied.closed.push((await store.closeItem(p.ws, u.id, { session: p.session, note: `reviewer confirmed: ${u.evidence}` })).id) } catch (e) { applied.skipped.push(`${u.id}: ${e.message}`) }
+    await step(`close:${u.id.toUpperCase()}`, async () => {
+      try { applied.closed.push((await store.closeItem(p.ws, u.id, { session: p.session, note: `reviewer confirmed: ${u.evidence}` })).id) } catch (e) { applied.skipped.push(`${u.id}: ${e.message}`) }
+    })
   }
-  if (add) for (const a of p.add || []) applied.added.push((await store.addItem(p.ws, a.text, { waiting: a.waiting })).id)
+  if (add) {
+    for (const [i, a] of (p.add || []).entries()) {
+      await step(`add:${i}`, async () => { applied.added.push((await store.addItem(p.ws, a.text, { waiting: a.waiting })).id) })
+    }
+  }
   if (close) {
     for (const c of p.close || []) {
-      try { applied.closed.push((await store.closeItem(p.ws, c.id, { session: p.session, note: c.evidence })).id) } catch (e) { applied.skipped.push(`${c.id}: ${e.message}`) }
+      await step(`close:${c.id.toUpperCase()}`, async () => {
+        try { applied.closed.push((await store.closeItem(p.ws, c.id, { session: p.session, note: c.evidence })).id) } catch (e) { applied.skipped.push(`${c.id}: ${e.message}`) }
+      })
     }
   }
   if (summary && p.log) {
-    // Same session's own log stub: safe to rewrite. Mark it reviewed-model text.
-    try {
-      const { data, content } = parseMd(store.normalizeEol(await fs.readFile(p.log, "utf-8")))
-      // Never replace a summary someone wrote; only fill an "(auto)" placeholder.
-      if (content.trim() && !/^\(auto\)/.test(content.trim())) {
-        applied.skipped.push("summary: session already has notes")
-        await fs.rm(p.file, { force: true })
-        return applied
-      }
-      data.source = `${data.source || "hook"}+model`
-      data.summary_model = p.model
-      if (applied.closed.length) data.closed = applied.closed
-      if (applied.added.length) data.added = applied.added
-      await store.writeFileAtomic(p.log, matter.stringify(`\n${p.summary}\n`, data))
-    } catch (e) { applied.skipped.push(`log: ${e.message}`) }
+    await step("summary", async () => {
+      // Same lock as session capture, so a hook rewriting this log can't race us.
+      await store.withLock(path.join(path.dirname(p.log), ".capture"), async () => {
+        try {
+          const { data, content } = parseMd(store.normalizeEol(await fs.readFile(p.log, "utf-8")))
+          // Never replace a summary someone wrote; only fill an "(auto)" placeholder.
+          if (content.trim() && !/^\(auto\)/.test(content.trim())) { applied.skipped.push("summary: session already has notes"); return }
+          data.source = `${data.source || "hook"}+model`
+          data.summary_model = p.model
+          if (applied.closed.length) data.closed = applied.closed
+          if (applied.added.length) data.added = applied.added
+          await store.writeFileAtomic(p.log, matter.stringify(`\n${p.summary}\n`, data))
+        } catch (e) { applied.skipped.push(`log: ${e.message}`) }
+      })
+    })
   }
-  await fs.rm(p.file, { force: true })
   return applied
 }
 

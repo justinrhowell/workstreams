@@ -1,7 +1,7 @@
 import next from "eslint-config-next/core-web-vitals"
 
 const config = [
-  { ignores: [".next/**", ".next-prod/**", "node_modules/**", "ws/**", "next-env.d.ts"] },
+  { ignores: [".next/**", ".next-*/**", "node_modules/**", "ws/**", "next-env.d.ts"] },
   ...next,
 ]
 

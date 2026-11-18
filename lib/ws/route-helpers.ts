@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server"
+import { ROOT_PROBLEM } from "@/ws/lib/store.mjs"
 
 export async function json<T>(fn: () => Promise<T>) {
+  // Same rule as the CLI: a relative WS_ROOT would read a different folder per process.
+  if (ROOT_PROBLEM) return NextResponse.json({ error: ROOT_PROBLEM }, { status: 500 })
   try {
     return NextResponse.json((await fn()) ?? { ok: true })
   } catch (e) {

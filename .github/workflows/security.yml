@@ -47,4 +47,5 @@ jobs:
         run: npm audit --omit=dev
 
       - name: Run npm audit (ws)
+        if: ${{ !cancelled() }} # still runs when the board audit fails
         run: npm --prefix ws ci && npm --prefix ws audit --omit=dev

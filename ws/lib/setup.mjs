@@ -3,7 +3,7 @@
 // hooks into each tool's settings, and registers the MCP server. Idempotent: re-running
 // reconciles ws's own entries (hooks, MCP, CLI link) and leaves everything else alone.
 import { spawnSync } from "node:child_process"
-import { promises as fs } from "node:fs"
+import { promises as fs, existsSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
@@ -37,12 +37,14 @@ export function hookCommand(tool, event, { wsPath, root, home } = {}) {
 
 // A hook entry is ws's only if the WHOLE command is a ws hook call, optionally with a
 // WS_ROOT=… prefix. A ws call inside a larger command belongs to the user.
-const WORD = String.raw`(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s'"]+)`
-const unquote = (w) => (w.startsWith("'") ? w.slice(1, -1) : w.startsWith('"') ? w.slice(1, -1).replace(/\\(.)/g, "$1") : w)
+// A shell word: quoted or escaped pieces glued together ('/a'\''b' is one word), with no
+// unquoted separators or redirections (; & | < > ( ) ` and newlines).
+const WORD = String.raw`(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[^\s'"\\;&|<>()\`])+`
+const unquote = (w) => w.replace(/'([^']*)'|"((?:[^"\\]|\\.)*)"|\\(.)/g, (_, sq, dq, esc) => sq ?? (dq !== undefined ? dq.replace(/\\(.)/g, "$1") : esc))
 export function classifyHook(cmd, tool, event) {
   const c = String(cmd || "").trim()
   const m = c.match(new RegExp(`^(?:WS_ROOT=${WORD}\\s+)?(${WORD})\\s+hook\\s+${tool}\\s+${event}$`))
-  if (m && /(^|\/)ws(\.mjs)?$/.test(unquote(m[1]))) return "ours"
+  if (m && /(^|\/)ws(\.mjs)?$/.test(unquote(m[1]).replace(/^\$HOME|^~/, ""))) return "ours"
   if (new RegExp(`\\bws(\\.mjs)?['"]?\\s+hook\\s+${tool}\\s+${event}\\b`).test(c)) return "embedded"
   return "other"
 }
@@ -75,7 +77,10 @@ export function mergeHooks(settings, tool, opts) {
       changes.push(`added ${name}`)
       continue
     }
-    const [{ g: keepG, h: keep }, ...dupes] = ours
+    // Only exact duplicates (same matcher) are merged: a ws hook under another matcher
+    // runs for different sessions, so removing it would change behaviour.
+    const [{ g: keepG, h: keep }, ...rest] = ours
+    const dupes = rest.filter(({ g }) => (g.matcher ?? null) === (keepG.matcher ?? null))
     if (keep.command !== command || keep.timeout !== timeout) {
       keep.command = command
       keep.timeout = timeout
@@ -124,16 +129,23 @@ async function readSettings(file) {
 // Write only if nobody changed the file since we read it; keep a timestamped backup;
 // replace atomically so an interruption can't leave half a settings file.
 async function writeSettings(file, before, json) {
-  const now = await fs.readFile(file, "utf-8").catch((e) => (e.code === "ENOENT" ? null : Promise.reject(e)))
-  if (now !== before) throw new Error(`${store.tildify(file)} changed while setup ran; run it again`)
   await fs.mkdir(path.dirname(file), { recursive: true })
-  let backup = null
-  if (before !== null) {
-    backup = `${file}.bak-ws-${new Date().toISOString().replace(/[:.]/g, "-")}`
-    await fs.writeFile(backup, before, { flag: "wx" })
-  }
-  await store.writeFileAtomic(file, JSON.stringify(json, null, 2) + "\n")
-  return backup
+  // The lock keeps two setup runs apart; the re-read catches an edit made since we read
+  // (the window left is the few milliseconds between this check and the rename).
+  return store.withLock(file + ".ws-setup", async () => {
+    const now = await fs.readFile(file, "utf-8").catch((e) => (e.code === "ENOENT" ? null : Promise.reject(e)))
+    if (now !== before) throw new Error(`${store.tildify(file)} changed while setup ran; run it again`)
+    let backup = null
+    if (before !== null) {
+      // Backups keep the original's permissions (settings files are often 0600).
+      const mode = (await fs.stat(file)).mode & 0o7777
+      backup = `${file}.bak-ws-${new Date().toISOString().replace(/[:.]/g, "-")}`
+      await fs.writeFile(backup, before, { flag: "wx", mode })
+      await fs.chmod(backup, mode)
+    }
+    await store.writeFileAtomic(file, JSON.stringify(json, null, 2) + "\n")
+    return backup
+  })
 }
 
 // Every external command runs with the env setup was given (HOME, PATH, CODEX_HOME, …),
@@ -188,7 +200,10 @@ function currentMcp(tool, env) {
   } catch { return null }
 }
 
-const mcpMatches = (cur, root, pin) => cur && cur.args === MCP && (pin ? cur.env.WS_ROOT === root : !cur.env.WS_ROOT)
+// Up to date only if it runs this checkout's server, with the right pin, through an
+// executable that still exists (an upgraded Node's old Cellar path doesn't).
+const commandWorks = (cmd, env) => cmd === "node" ? runs("node", ["-v"], env) : existsSync(cmd)
+const mcpMatches = (cur, root, pin, env) => cur && cur.args === MCP && (pin ? cur.env.WS_ROOT === root : !cur.env.WS_ROOT) && commandWorks(cur.command, env)
 const isWsServer = (cur) => cur && /(^|\/)ws\/mcp\/server\.mjs$/.test(cur.args)
 
 function mcpAddCommand(tool, root, pin, env) {
@@ -197,6 +212,12 @@ function mcpAddCommand(tool, root, pin, env) {
   return tool === "claude"
     ? ["claude", "mcp", "add", "--scope", "user", "ws", ...pins.flatMap((e) => ["-e", e]), "--", nodeCommand(env), MCP]
     : ["codex", "mcp", "add", ...pins.flatMap((e) => ["--env", e]), "ws", "--", nodeCommand(env), MCP]
+}
+function restoreCommand(tool, cur) {
+  const pins = Object.entries(cur.env || {}).map(([k, v]) => `${k}=${v}`)
+  return tool === "claude"
+    ? ["claude", "mcp", "add", "--scope", "user", "ws", ...pins.flatMap((e) => ["-e", e]), "--", cur.command, cur.args]
+    : ["codex", "mcp", "add", ...pins.flatMap((e) => ["--env", e]), "ws", "--", cur.command, cur.args]
 }
 const mcpRemoveCommand = (tool) => (tool === "claude" ? ["claude", "mcp", "remove", "--scope", "user", "ws"] : ["codex", "mcp", "remove", "ws"])
 
@@ -294,13 +315,20 @@ export async function runSetup({ tools, link = true, hooks = true, mcp = true, d
       const shown = add.map(q).join(" ")
       if (!runs(tool, undefined, env)) { log(`${tool} MCP: \`${tool}\` not found on PATH; run later:\n  ${shown}`); continue }
       const cur = currentMcp(tool, env)
-      if (mcpMatches(cur, root, pin)) { log(`${tool} MCP: up to date`); continue }
+      if (mcpMatches(cur, root, pin, env)) { log(`${tool} MCP: up to date`); continue }
       if (cur && !isWsServer(cur)) { log(`${tool} MCP: a different server is registered as "ws" (${cur.args}); left as is`); continue }
       if (cur && !cur.user) { log(`${tool} MCP: "ws" is registered in a project or local scope; update it by hand:\n  ${shown}`); continue }
       say(`${tool} MCP: ${cur ? "update" : "add"}: ${shown}`)
       if (!dryRun) {
         if (cur && !run(mcpRemoveCommand(tool), log, env)) { problems.push(`${tool} MCP: couldn't remove the old registration`); continue }
-        if (!run(add, log, env)) problems.push(`${tool} MCP: registration failed; run by hand: ${shown}`)
+        if (!run(add, log, env)) {
+          // Put the previous registration back rather than leave the tool without ws.
+          if (cur) {
+            const restore = restoreCommand(tool, cur)
+            log(run(restore, log, env) ? "  restored the previous registration" : `  couldn't restore the previous registration; it was: ${restore.map(q).join(" ")}`)
+          }
+          problems.push(`${tool} MCP: registration failed; run by hand: ${shown}`)
+        }
       }
     }
   }

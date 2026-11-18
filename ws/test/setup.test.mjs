@@ -209,3 +209,52 @@ test("setup and uninstall call the claude/codex found on the env's PATH, never t
   assert.match(log, /^codex mcp add --env WS_ROOT=.* ws -- \S*node /m)
   assert.match(log, /^claude mcp get ws$/m)
 })
+
+test("R2: ws hooks under different matchers are not merged as duplicates", () => {
+  const before = { hooks: { SessionStart: [
+    { hooks: [{ type: "command", command: "/bin/ws hook claude start", timeout: 10 }] },
+    { matcher: "resume", hooks: [{ type: "command", command: "/bin/ws hook claude start", timeout: 10 }] },
+  ] } }
+  const { settings, changes } = mergeHooks(before, "claude", DEF)
+  assert.ok(!changes.some((c) => /duplicate/.test(c)))
+  assert.equal(settings.hooks.SessionStart.length, 2)
+})
+
+test("R2: if replacing an outdated MCP registration fails, the previous one is restored", async () => {
+  const { env } = await fakeHome("home-restore")
+  const bin = path.join(tmp, "stub-restore")
+  const calls = path.join(tmp, "restore-calls.txt")
+  await fs.mkdir(bin, { recursive: true })
+  const old = "/old/checkout/ws/mcp/server.mjs"
+  // Stub claude: reports an old registration, accepts remove, refuses to add the new path.
+  await fs.writeFile(path.join(bin, "claude"), `#!/bin/sh
+echo "claude $*" >> "${calls}"
+case "$*" in
+  "mcp get ws") printf 'ws:\\n  Scope: User config\\n  Command: node\\n  Args: ${old}\\n'; exit 0;;
+  *"${old}"*) exit 0;;
+  "mcp add"*) echo "boom" >&2; exit 1;;
+esac
+exit 0
+`, { mode: 0o755 })
+  env.PATH = `${bin}:/usr/bin:/bin`
+  const lines = []
+  const r = await runSetup({ tools: ["claude"], link: false, hooks: false, env, log: (s) => lines.push(s) })
+  const log = await fs.readFile(calls, "utf-8")
+  assert.match(log, /claude mcp remove --scope user ws/)
+  assert.match(log, new RegExp(`claude mcp add --scope user ws -- node ${old}`))
+  assert.ok(lines.some((l) => /restored the previous registration/.test(l)))
+  assert.equal(r.problems.length, 1)
+})
+
+test("R2: setup keeps a symlinked settings file a symlink, and its mode", async () => {
+  const { env } = await fakeHome("home-link")
+  const real = path.join(tmp, "dotfiles-settings.json")
+  await fs.writeFile(real, "{}", { mode: 0o600 })
+  await fs.chmod(real, 0o600)
+  await fs.rm(settingsFile("claude", env), { force: true })
+  await fs.symlink(real, settingsFile("claude", env))
+  await runSetup({ tools: ["claude"], mcp: false, link: false, env, log: () => {} })
+  assert.ok((await fs.lstat(settingsFile("claude", env))).isSymbolicLink())
+  assert.match(await fs.readFile(real, "utf-8"), /hook claude start/)
+  assert.equal((await fs.stat(real)).mode & 0o777, 0o600)
+})

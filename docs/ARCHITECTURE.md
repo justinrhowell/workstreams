@@ -46,7 +46,7 @@ graph LR
 
 All writers go through `ws/lib`. That way item IDs are allocated once, the `open.md` lock is always taken, and the opt-in mirror block stays in sync.
 
-- **Writes are atomic:** every file is written to a temp file and renamed into place, so a crash leaves the old version or the new one, never half a file.
+- **Writes are atomic:** workstream files, logs, proposals, queue jobs and the settings files `ws setup` edits are written to a temp file and renamed (or, for new files, hard-linked) into place, so a crash leaves the old version or the new one, never half a file. Symlinked files are written through to their target, and file permissions are kept.
 - **Damage is refused, not overwritten:** a missing `open.md` is empty, but an unreadable one, or one with item lines ws can't parse, stops the command with an error instead of being rewritten without them.
 - **Record text is one line:** newlines in item and decision text are collapsed, so text can't forge another record. Line endings are normalized, so files edited on Windows still parse.
 - **Locks:** `open.md`, `decisions.md` and `WORKSTREAM.md` changes, session-log adoption and the summary drain each take a lock.
@@ -59,7 +59,7 @@ All writers go through `ws/lib`. That way item IDs are allocated once, the `open
   - **Start note:** returned as `hookSpecificOutput.additionalContext`, and it defers to the user.
 - **`summarize.mjs`** drafts proposals for sessions that ended without notes. The hook only enqueues; a detached `ws summarize --drain` does the work.
   - **Model input:** a digest of the session (your prompts, assistant text, tool names with the first 140 characters of each tool's main argument; no tool output), with common credential shapes redacted first, sent in JSON mode. Server-specific fields (for example turning thinking off on vLLM) come from `llm.extraBody` in config. The reply must finish with `stop`.
-  - **Validation:** a close must quote an assistant or tool line verbatim (never the user's request), must not copy the item text, and must share words with the item. A decision must quote the user. Anything that fails becomes an *unverified* suggestion, off by default. New items that restate open ones are dropped. Accepting claims the proposal first, so it can't be applied twice.
+  - **Validation:** a close must quote an assistant or tool line verbatim (never the user's request), must not copy the item text, and must share words with the item. A decision must quote the user. Anything that fails becomes an *unverified* suggestion, off by default. New items that restate open ones are dropped. Accepting is exclusive and safe to retry: the first accept claims the proposal (a second one is refused), and each step is recorded as it lands, so an accept interrupted by a crash or an error shows up again in `ws review`. Accepting it again finishes only the steps that hadn't landed.
   - **Failures:** endpoint outages never use up a job's attempts.
   - **Review:** proposals apply only through `ws review accept` or the board. Accepting never overwrites notes someone wrote.
 
@@ -70,7 +70,7 @@ All writers go through `ws/lib`. That way item IDs are allocated once, the `open
 
 ## Recall
 
-- `ws go <id>` opens the composed prompt in `$VISUAL`, else `$EDITOR`, else `nano` (run through `sh`, so `code --wait` works), with the cursor on the input slot. On save it launches `claude -n "<title>"` or `codex` in the workstream's cwd with `WS_ID` set. `--resume` reuses a session from the last 12 hours.
+- `ws go <id>` opens the composed prompt in `$VISUAL`, else `$EDITOR`, else `nano` (run through `sh`, so `code --wait` works), with the cursor on the input slot when the editor supports `+LINE` (nano, vim, nvim, emacs, micro). On save it launches `claude -n "<title>"` or `codex` in the workstream's cwd with `WS_ID` set. `--resume` reuses a session from the last 12 hours.
 - `ws prompt <id>` copies the prompt for desktop or web apps.
 - The MCP tools (`ws_show`, `ws_compose`, `ws_item_*`, `ws_log`, …) give both CLIs a native way to read and write.
 - A "park" or handoff skill in your agent setup can call the same MCP tools to record what a session changed before you switch away.

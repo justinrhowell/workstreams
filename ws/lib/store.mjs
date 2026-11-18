@@ -53,15 +53,36 @@ export async function readText(file) {
 }
 
 // Write to a unique temp file beside the target, then rename over it. A crash or a
-// full disk leaves either the old file or the new one, never a truncated one.
+// full disk leaves either the old file or the new one, never a truncated one. A symlinked
+// target (dotfiles) is written through to its real file, and the file's mode is kept,
+// so a private 0600 file stays private.
 export async function writeFileAtomic(file, text) {
-  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
+  let target = file
+  let mode = null
   try {
-    await fs.writeFile(tmp, text, { flag: "wx" })
-    await fs.rename(tmp, file)
+    target = await fs.realpath(file)
+    mode = (await fs.stat(target)).mode & 0o7777
+  } catch (e) { if (e.code !== "ENOENT") throw e }
+  const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
+  try {
+    await fs.writeFile(tmp, text, { flag: "wx", ...(mode !== null ? { mode } : {}) })
+    if (mode !== null) await fs.chmod(tmp, mode)
+    await fs.rename(tmp, target)
   } catch (e) {
     await fs.rm(tmp, { force: true }).catch(() => {})
     throw e
+  }
+}
+
+// Create a file that must not exist yet, all at once: write a temp file, then hard-link
+// it into place (link fails with EEXIST instead of replacing anything).
+export async function createFileAtomic(file, text) {
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
+  try {
+    await fs.writeFile(tmp, text, { flag: "wx" })
+    await fs.link(tmp, file)
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => {})
   }
 }
 
@@ -214,7 +235,7 @@ export async function deleteWorkstream(id) {
       } catch {}
     }
   }
-  await fs.writeFile(path.join(dest, "TRASHED.json"), JSON.stringify({ id, title: ws.title, deleted_at: new Date().toISOString() }, null, 2))
+  await writeFileAtomic(path.join(dest, "TRASHED.json"), JSON.stringify({ id, title: ws.title, deleted_at: new Date().toISOString() }, null, 2))
   return { trash: path.basename(dest) }
 }
 
@@ -257,14 +278,19 @@ export async function restoreWorkstream(name) {
   for (const [from, to] of [["queue", "queue"], ["queue-failed", path.join("queue", "failed")]]) {
     if (!(await exists(path.join(src, from)))) continue
     await fs.mkdir(path.join(ROOT, to), { recursive: true })
-    for (const f of await fs.readdir(path.join(src, from))) await fs.rename(path.join(src, from, f), path.join(ROOT, to, f))
+    for (const f of await fs.readdir(path.join(src, from))) {
+      // A job re-queued since the delete is newer: keep it, drop the trashed copy.
+      if (await exists(path.join(ROOT, to, f))) continue
+      await fs.rename(path.join(src, from, f), path.join(ROOT, to, f))
+    }
   }
   await fs.rm(src, { recursive: true, force: true })
   return { id }
 }
 
 export async function emptyTrash(name) {
-  const targets = name ? [await trashEntry(name)] : (await listTrash()).map((t) => path.join(TRASH_DIR, t.name))
+  // Only an absent name means "everything"; "" or any other value must name one entry.
+  const targets = name !== undefined && name !== null ? [await trashEntry(name)] : (await listTrash()).map((t) => path.join(TRASH_DIR, t.name))
   for (const t of targets) await fs.rm(t, { recursive: true, force: true })
   return targets.length
 }
@@ -302,7 +328,9 @@ export function parseOpen(text) {
   const unparsed = []
   for (const line of text.split("\n")) {
     const m = line.match(ITEM_RE)
-    if (!m) { if (/^- \[[ xX]\]/.test(line)) unparsed.push(line); continue }
+    // Anything that looks like a checkbox record but doesn't parse exactly is reported,
+    // so a hand edit (indent, "*", "[X]") is never dropped by the next write.
+    if (!m) { if (/^\s*[-*+]\s*\[[ xX]?\]/.test(line)) unparsed.push(line); continue }
     let rest = m[3]
     let waiting = null
     let closed = null
@@ -354,20 +382,39 @@ async function writeOpen(id, state, title) {
   await writeFileAtomic(path.join(WS_DIR, id, "open.md"), renderOpen(state, title))
 }
 
+// A lock is a directory holding its owner's token. The owner refreshes it every few
+// seconds, so a live owner is never treated as stale; only a lock untouched for 30s (its
+// process died or froze) is taken over. Release removes the lock only if it is still ours.
+const LOCK_STALE_MS = 30_000
 export async function withLock(file, fn) {
   const lock = file + ".lock"
+  const token = `${process.pid}-${Math.random().toString(36).slice(2)}`
   const start = Date.now()
   for (;;) {
     try { await fs.mkdir(lock); break } catch (e) {
       if (e.code !== "EEXIST") throw e
       try {
-        if (Date.now() - (await fs.stat(lock)).mtimeMs > 30_000) { await fs.rm(lock, { recursive: true, force: true }); continue }
+        if (Date.now() - (await fs.stat(lock)).mtimeMs > LOCK_STALE_MS) {
+          // Take over by renaming: only one waiter can win the rename.
+          const grave = `${lock}.stale-${token}`
+          await fs.rename(lock, grave)
+          await fs.rm(grave, { recursive: true, force: true })
+          continue
+        }
       } catch {}
-      if (Date.now() - start > 5000) throw new Error(`Timed out waiting for lock ${tildify(lock)}`)
+      if (Date.now() - start > 10_000) throw new Error(`Timed out waiting for lock ${tildify(lock)}`)
       await new Promise((r) => setTimeout(r, 50))
     }
   }
-  try { return await fn() } finally { await fs.rm(lock, { recursive: true, force: true }) }
+  await fs.writeFile(path.join(lock, "owner"), token)
+  const beat = setInterval(() => { const t = new Date(); fs.utimes(lock, t, t).catch(() => {}) }, 5_000)
+  beat.unref?.()
+  try { return await fn() } finally {
+    clearInterval(beat)
+    let mine = false
+    try { mine = (await fs.readFile(path.join(lock, "owner"), "utf-8")) === token } catch {}
+    if (mine) await fs.rm(lock, { recursive: true, force: true })
+  }
 }
 
 async function mutateOpen(id, fn) {
@@ -482,7 +529,7 @@ export function parseDecisions(text) {
   let cur = null
   for (const line of text.split("\n")) {
     const m = line.match(DEC_RE)
-    if (!m && /^- \[(active|superseded)/.test(line)) { unparsed.push(line); cur = null; continue }
+    if (!m && /^\s*[-*+]\s*\[\s*(active|superseded)/i.test(line)) { unparsed.push(line); cur = null; continue }
     if (m) {
       cur = { id: m[3], text: m[4].trim(), date: m[5] || null, active: m[1] === "active", superseded_by: m[2] || null }
       decisions.push(cur)
@@ -578,7 +625,7 @@ export async function appendLog(id, entry) {
   const { summary = "", ...meta } = entry
   const data = { ended: now.toISOString(), source: "manual", ...meta }
   for (const k of Object.keys(data)) if (data[k] === undefined || data[k] === null) delete data[k]
-  await fs.writeFile(file, matter.stringify(`\n${summary.trim()}\n`, data), { flag: "wx" })
+  await createFileAtomic(file, matter.stringify(`\n${summary.trim()}\n`, data))
   return file
 }
 

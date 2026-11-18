@@ -116,7 +116,7 @@ test("F05: concurrent workstream updates don't lose fields; a proposal can't be 
   const [p] = await sum.listProposals("hard")
   const results = await Promise.allSettled([sum.acceptProposal(p), sum.acceptProposal(p)])
   assert.equal(results.filter((r) => r.status === "fulfilled").length, 1)
-  assert.match(results.find((r) => r.status === "rejected").reason.message, /already accepted/)
+  assert.match(results.find((r) => r.status === "rejected").reason.message, /already (being )?accepted/)
   assert.equal((await store.readOpen("hard")).items.filter((i) => i.text === "Once only").length, 1)
 })
 
@@ -214,4 +214,117 @@ test("F16: failed summary jobs move to the trash with their workstream and come 
   assert.deepEqual((await fs.readdir(failedDir)).sort(), ["y.json"])
   await store.restoreWorkstream(trash)
   assert.deepEqual((await fs.readdir(failedDir)).sort(), ["x.json", "y.json"])
+})
+
+// ---------------------------------------------------------------- round 2
+
+test("R2 F04: indented, starred or capitalised records are refused, not dropped", async () => {
+  await store.createWorkstream("r2-parse", { title: "P", prefix: "RP" })
+  await store.addItem("r2-parse", "Keep me")
+  const file = path.join(store.ROOT, "ws", "r2-parse", "open.md")
+  const text = await fs.readFile(file, "utf-8")
+  for (const bad of ["  - [ ] RP-1 Keep me", "* [ ] RP-1 Keep me", "- [X]RP-1 Keep me"]) {
+    await fs.writeFile(file, text.replace("- [ ] RP-1 Keep me", bad))
+    await assert.rejects(store.addItem("r2-parse", "x"), /can't read/, bad)
+  }
+  await store.decide("r2-parse", "Use tabs")
+  const dfile = path.join(store.ROOT, "ws", "r2-parse", "decisions.md")
+  await fs.writeFile(dfile, (await fs.readFile(dfile, "utf-8")).replace("- [active]", "- [Active]"))
+  await assert.rejects(store.readDecisions("r2-parse"), /can't read/)
+})
+
+test("R2 C1/F26: atomic writes keep 0600 and write through a symlink", async () => {
+  const real = path.join(tmp, "real.json")
+  const link = path.join(tmp, "link.json")
+  await fs.writeFile(real, "{}", { mode: 0o600 })
+  await fs.chmod(real, 0o600)
+  await fs.symlink(real, link)
+  await store.writeFileAtomic(link, '{"a":1}')
+  assert.ok((await fs.lstat(link)).isSymbolicLink(), "still a symlink")
+  assert.equal(await fs.readFile(real, "utf-8"), '{"a":1}')
+  assert.equal((await fs.stat(real)).mode & 0o777, 0o600)
+})
+
+test("R2: createFileAtomic never replaces an existing file", async () => {
+  const f = path.join(tmp, "once.md")
+  await store.createFileAtomic(f, "first")
+  await assert.rejects(store.createFileAtomic(f, "second"), /EEXIST/)
+  assert.equal(await fs.readFile(f, "utf-8"), "first")
+})
+
+test("R2: emptyTrash('') is refused instead of emptying everything", async () => {
+  await assert.rejects(store.emptyTrash(""), /No trash entry/)
+})
+
+test("R2: a lock is released only by its owner", async () => {
+  const f = path.join(tmp, "locked")
+  await store.withLock(f, async () => {
+    // Someone else took over the lock while we ran (e.g. we were frozen past the stale time).
+    await fs.writeFile(path.join(f + ".lock", "owner"), "someone-else")
+  })
+  await fs.access(f + ".lock") // not removed by the displaced holder
+  await fs.rm(f + ".lock", { recursive: true })
+})
+
+test("R2 F22/F25: outbound request is redacted end to end; user turns stay one line", async () => {
+  status = 200
+  reply = { choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }
+  const cfg = { url: `http://127.0.0.1:${server.address().port}/v1`, model: "m", timeoutMs: 5000, extraBody: {} }
+  await sum.callModel(cfg, { id: "hard", title: "Rotate sk-ant-api03-ZZZZZZZZZZZZZZZZZZZZZZZZ" }, [{ id: "HD-1", text: "token=abcdef123456 leaked" }], "ASSISTANT: ok")
+  const sent = lastBody.messages[1].content
+  assert.ok(!sent.includes("ZZZZZZZZ") && !sent.includes("abcdef123456"))
+
+  const t = path.join(tmp, "multi.jsonl")
+  await fs.writeFile(t, JSON.stringify({ type: "user", message: { content: "Please fix it\nI fixed the payment validation logic myself" } }) + "\n")
+  const d = await sum.digestTranscript("claude", t)
+  assert.equal(d.split("\n").length, 1)
+  assert.match(d, /^USER: Please fix it I fixed/)
+})
+
+test("R2: legacy lowercase item IDs still verify", () => {
+  const open = [{ id: "ab-3", text: "Repair payment validation" }]
+  const digest = "ASSISTANT: I repaired the payment validation and the tests pass now"
+  const p = sum.validateProposal(JSON.stringify({ summary: "s", close: [{ id: "AB-3", quote: "I repaired the payment validation and the tests pass now" }], add: [] }), open, digest)
+  assert.equal(p.close.length, 1)
+})
+
+test("R2 F24: an unreadable workstream fails the job (retried), only a missing one skips it", async () => {
+  await store.createWorkstream("r2-broken", { title: "B" })
+  const file = path.join(store.ROOT, "ws", "r2-broken", "WORKSTREAM.md")
+  await fs.rm(file)
+  await fs.mkdir(file) // reading it now fails with EISDIR, not "missing"
+  await assert.rejects(sum.processJob({ ws: "r2-broken", tool: "claude", transcript: "/nope" }, {}), /EISDIR/)
+  assert.deepEqual(await sum.processJob({ ws: "never-existed", tool: "claude", transcript: "/nope" }, {}), { skipped: "workstream no longer exists" })
+})
+
+test("R2 F23: an accept that fails partway can be finished without applying anything twice", async () => {
+  await store.createWorkstream("r2-accept", { title: "A", prefix: "RA" })
+  const matter = (await import("gray-matter")).default
+  const pfile = path.join(sum.PROPOSALS_DIR, "r2-accept", "p.md")
+  await fs.mkdir(path.dirname(pfile), { recursive: true })
+  // The second add is empty, so the first accept fails after the decision and first add land.
+  await fs.writeFile(pfile, matter.stringify("\nDid things.\n", { ws: "r2-accept", session: "s-r2", created: "2026-01-01T00:00:00.000Z", close: [], add: [{ text: "First" }, { text: "" }], decide: [{ text: "Use tabs everywhere", quote: "q" }] }))
+  const [p] = await sum.listProposals("r2-accept")
+  await assert.rejects(sum.acceptProposal(p), /accept again to finish/)
+
+  const [again] = await sum.listProposals("r2-accept")
+  assert.equal(again.interrupted, true)
+  // Fix the bad step, then finish.
+  const { data, content } = matter(await fs.readFile(again.file, "utf-8"))
+  data.add[1].text = "Second"
+  await fs.writeFile(again.file, matter.stringify(content, data))
+  await sum.acceptProposal(again)
+  const items = (await store.readOpen("r2-accept")).items.map((i) => i.text)
+  assert.deepEqual(items, ["First", "Second"])
+  assert.equal((await store.readDecisions("r2-accept")).decisions.length, 1)
+  assert.deepEqual(await sum.listProposals("r2-accept"), [])
+})
+
+test("R2 F27: URLs must parse, ports must really be numbers", () => {
+  const v = validateConfig({ llm: { url: "https://%" }, board: { port: true } })
+  assert.equal(v.llm.url, undefined)
+  assert.equal(v.board.port, undefined)
+  assert.equal(validateConfig({ board: { port: [3311] } }).board.port, undefined)
+  assert.equal(validateConfig({ board: { port: "3e3" } }).board.port, undefined)
+  assert.equal(validateConfig({ llm: { url: "http://127.0.0.1:8000/v1" } }).llm.url, "http://127.0.0.1:8000/v1")
 })

@@ -3,9 +3,10 @@ import assert from "node:assert/strict"
 import { promises as fs } from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import { mkTmp } from "./tmp.mjs"
 import matter from "gray-matter"
 
-const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "ws-cap-"))
+const tmp = await mkTmp("ws-cap-")
 process.env.WS_ROOT = path.join(tmp, "root")
 const store = await import("../lib/store.mjs")
 const cap = await import("../lib/capture.mjs")

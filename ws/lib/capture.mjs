@@ -137,7 +137,9 @@ const under = (child, parent) => {
 // Auto-link only on WS_ID or exactly one claimant at the longest cwd prefix.
 export function matchWorkstream(list, cwd, wsId) {
   if (wsId && list.some((w) => w.id === wsId)) return { link: wsId, candidates: [wsId] }
-  const live = list.filter((w) => w.cwd && ["active", "waiting"].includes(w.status) && under(cwd, w.cwd))
+  // A relative cwd (from a hand edit or an older `ws set`) would resolve against the
+  // session's own folder and claim every session, so it never matches.
+  const live = list.filter((w) => w.cwd && path.isAbsolute(w.cwd) && ["active", "waiting"].includes(w.status) && under(cwd, w.cwd))
   if (!live.length) return { link: null, candidates: [] }
   const len = (w) => canon(w.cwd).length
   const best = Math.max(...live.map(len))

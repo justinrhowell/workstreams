@@ -12,8 +12,9 @@ export type Item = { id: string; done: boolean; text: string; waiting: string | 
 const day = (v: unknown) => String(v ?? "").slice(0, 10)
 
 export async function boardData() {
+  const broken: { id: string; error: string }[] = []
   const [list, proposals, inbox, queue] = await Promise.all([
-    store.listWorkstreams(),
+    store.listWorkstreams({ broken }),
     summarize.listProposals(),
     capture.listInbox(),
     summarize.listQueue(),
@@ -40,7 +41,7 @@ export async function boardData() {
     }),
   )
   const trash = await store.listTrash()
-  return { workstreams, counts: { inbox: inbox.length, review: proposals.length, queued: queue.length, trash: trash.length }, root: store.tildify(store.ROOT), staleDays: STALE_DAYS }
+  return { workstreams, counts: { inbox: inbox.length, review: proposals.length, queued: queue.length, trash: trash.length }, root: store.tildify(store.ROOT), staleDays: STALE_DAYS, broken }
 }
 
 export type Board = Awaited<ReturnType<typeof boardData>>

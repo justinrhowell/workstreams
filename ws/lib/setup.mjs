@@ -43,8 +43,10 @@ const WORD = String.raw`(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[^\s'"\\;&|<>()\`])+`
 const unquote = (w) => w.replace(/'([^']*)'|"((?:[^"\\]|\\.)*)"|\\(.)/g, (_, sq, dq, esc) => sq ?? (dq !== undefined ? dq.replace(/\\(.)/g, "$1") : esc))
 export function classifyHook(cmd, tool, event) {
   const c = String(cmd || "").trim()
+  // Command substitution or a second line means more than a ws call, quoted or not.
+  const extra = /[\n\r`]|\$\(/.test(c)
   const m = c.match(new RegExp(`^(?:WS_ROOT=${WORD}\\s+)?(${WORD})\\s+hook\\s+${tool}\\s+${event}$`))
-  if (m && /(^|\/)ws(\.mjs)?$/.test(unquote(m[1]).replace(/^\$HOME|^~/, ""))) return "ours"
+  if (m && !extra && /(^|\/)ws(\.mjs)?$/.test(unquote(m[1]).replace(/^\$HOME|^~/, ""))) return "ours"
   if (new RegExp(`\\bws(\\.mjs)?['"]?\\s+hook\\s+${tool}\\s+${event}\\b`).test(c)) return "embedded"
   return "other"
 }
@@ -77,20 +79,22 @@ export function mergeHooks(settings, tool, opts) {
       changes.push(`added ${name}`)
       continue
     }
-    // Only exact duplicates (same matcher) are merged: a ws hook under another matcher
-    // runs for different sessions, so removing it would change behaviour.
-    const [{ g: keepG, h: keep }, ...rest] = ours
-    const dupes = rest.filter(({ g }) => (g.matcher ?? null) === (keepG.matcher ?? null))
-    if (keep.command !== command || keep.timeout !== timeout) {
-      keep.command = command
-      keep.timeout = timeout
-      changes.push(`updated ${name}`)
+    // Every ws hook is brought up to date. Copies under the same matcher are merged; a
+    // copy under another matcher runs for other sessions, so it's kept (and updated).
+    const seen = new Set()
+    let updated = false
+    for (const { g, h } of ours) {
+      const key = g.matcher ?? null
+      if (seen.has(key)) {
+        g.hooks = g.hooks.filter((x) => x !== h)
+        changes.push(`removed duplicate ${name}`)
+        continue
+      }
+      seen.add(key)
+      if (h.command !== command || h.timeout !== timeout) { h.command = command; h.timeout = timeout; updated = true }
+      if (g.matcher) notes.push(`${name}: a ws hook sits under matcher "${g.matcher}", so it only runs for those sessions`)
     }
-    if (keepG.matcher) notes.push(`${name}: the ws hook sits under matcher "${keepG.matcher}", so it only runs for those sessions`)
-    for (const { g, h } of dupes) {
-      g.hooks = g.hooks.filter((x) => x !== h)
-      changes.push(`removed duplicate ${name}`)
-    }
+    if (updated) changes.push(`updated ${name}`)
     out.hooks[name] = groups.filter((g) => (g.hooks || []).length)
   }
   return { settings: out, changes, notes }
@@ -196,13 +200,15 @@ function currentMcp(tool, env) {
   if (r.status !== 0) return null
   try {
     const t = JSON.parse(r.stdout).transport || {}
-    return { command: t.command, args: (t.args || []).join(" "), env: t.env || {}, user: true }
+    return { command: t.command, args: (t.args || []).join(" "), argv: t.args || [], env: t.env || {}, user: true }
   } catch { return null }
 }
 
 // Up to date only if it runs this checkout's server, with the right pin, through an
 // executable that still exists (an upgraded Node's old Cellar path doesn't).
-const commandWorks = (cmd, env) => cmd === "node" ? runs("node", ["-v"], env) : existsSync(cmd)
+const commandWorks = (cmd, env) => cmd === "node"
+  ? runs("node", ["-v"], env)
+  : /(^|\/)node(\.exe)?$/.test(String(cmd)) && existsSync(cmd) && runs(cmd, ["-v"], env)
 const mcpMatches = (cur, root, pin, env) => cur && cur.args === MCP && (pin ? cur.env.WS_ROOT === root : !cur.env.WS_ROOT) && commandWorks(cur.command, env)
 const isWsServer = (cur) => cur && /(^|\/)ws\/mcp\/server\.mjs$/.test(cur.args)
 
@@ -217,7 +223,7 @@ function restoreCommand(tool, cur) {
   const pins = Object.entries(cur.env || {}).map(([k, v]) => `${k}=${v}`)
   return tool === "claude"
     ? ["claude", "mcp", "add", "--scope", "user", "ws", ...pins.flatMap((e) => ["-e", e]), "--", cur.command, cur.args]
-    : ["codex", "mcp", "add", ...pins.flatMap((e) => ["--env", e]), "ws", "--", cur.command, cur.args]
+    : ["codex", "mcp", "add", ...pins.flatMap((e) => ["--env", e]), "ws", "--", cur.command, ...(cur.argv || [cur.args])]
 }
 const mcpRemoveCommand = (tool) => (tool === "claude" ? ["claude", "mcp", "remove", "--scope", "user", "ws"] : ["codex", "mcp", "remove", "ws"])
 

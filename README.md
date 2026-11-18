@@ -40,7 +40,7 @@ npm ci                # once, from the repo root
 ws board              # http://127.0.0.1:3311
 ```
 
-A local web view of every workstream: columns by status, staleness, the inbox, summarizer proposals, and per-workstream detail. It binds to 127.0.0.1 and has no login. It refuses requests from other web pages (cross-origin, DNS rebinding) and requests relayed by a proxy, but a program that can reach the port and forges headers could still get in, so keep it local: never expose it through a tunnel, proxy or `0.0.0.0`. On macOS, `ws board --install` keeps it running in the background.
+A local web view of every workstream: columns by status, staleness, the inbox, summarizer proposals, and per-workstream detail. It binds to 127.0.0.1 and has no login. It refuses requests from other web pages (cross-origin, DNS rebinding) and requests a typical proxy marks as coming from elsewhere, but headers can be forged, so a program that can reach the port could still get in; so keep it local: never expose it through a tunnel, proxy or `0.0.0.0`. On macOS, `ws board --install` keeps it running in the background.
 
 ## Parts
 

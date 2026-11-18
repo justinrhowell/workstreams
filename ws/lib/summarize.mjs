@@ -98,10 +98,14 @@ export async function listFailed() {
 export async function requeueFailed() {
   const files = await listFailed()
   for (const f of files) {
-    const job = JSON.parse(await fs.readFile(f, "utf-8"))
-    job.attempts = 0
-    await store.writeFileAtomic(path.join(QUEUE_DIR, path.basename(f)), JSON.stringify(job, null, 2))
-    await fs.rm(f)
+    const dest = path.join(QUEUE_DIR, path.basename(f))
+    await store.withLock(dest, async () => {
+      const job = JSON.parse(await fs.readFile(f, "utf-8"))
+      job.attempts = 0
+      job.token = Math.random().toString(36).slice(2)
+      await store.writeFileAtomic(dest, JSON.stringify(job, null, 2))
+      await fs.rm(f)
+    })
   }
   return files.length
 }
@@ -144,7 +148,9 @@ const SECRET_PATTERNS = [
   [/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted]"],
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, "[redacted jwt]"],
   [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [redacted]"],
-  [/((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)["']?\s*[:=]\s*["']?)[^\s"'&,;]{6,}/gi, "$1[redacted]"],
+  // key=value / key: value, but only when the value looks like a credential (8+ chars with
+  // both letters and digits), so prose like "token: refresh bug" survives.
+  [/((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)["']?\s*[:=]\s*["']?)(?=[^\s"'&,;]*\d)(?=[^\s"'&,;]*[A-Za-z])[^\s"'&,;]{8,}/gi, "$1[redacted]"],
   [/(\/\/)[^/\s:@]+:[^/\s@]+@/g, "$1[redacted]@"],
 ]
 export function redact(text) {
@@ -205,7 +211,10 @@ export async function digestTranscript(tool, file) {
   const all = redact(lines.join("\n"))
   if (all.length <= DIGEST_CHARS) return all
   // Keep the opening (the ask) and weight the rest toward the end (the outcome).
-  return all.slice(0, HEAD_CHARS) + "\n\n[… middle of session omitted …]\n\n" + all.slice(-(DIGEST_CHARS - HEAD_CHARS))
+  // Cut on line boundaries, so every kept line still starts with its speaker.
+  const head = all.slice(0, HEAD_CHARS)
+  const tail = all.slice(-(DIGEST_CHARS - HEAD_CHARS))
+  return head.slice(0, Math.max(0, head.lastIndexOf("\n"))) + "\n\n[… middle of session omitted …]\n\n" + tail.slice(tail.indexOf("\n") + 1)
 }
 
 // ------------------------------------------------------------------ model call
@@ -407,7 +416,8 @@ export async function processJob(job, cfg) {
   const data = { ws: job.ws, session: job.session, tool: job.tool, log: job.log, model, created: new Date().toISOString(), close: proposal.close, add: proposal.add, unverified: proposal.unverified, decide: proposal.decide }
   // Deleted while the model was working, or the job was re-queued (a newer session end):
   // don't publish this generation's proposal.
-  if (!(await fs.access(ws.file).then(() => true, () => false))) return { skipped: "workstream deleted during summary" }
+  const gone = await fs.access(ws.file).then(() => false, (e) => (e.code === "ENOENT" ? true : Promise.reject(e)))
+  if (gone) return { skipped: "workstream deleted during summary" }
   const publish = async () => {
     if (job.file && job.token && !(await sameJob(job))) return false
     await store.writeFileAtomic(file, matter.stringify(`\n${proposal.summary}\n`, data))
@@ -522,16 +532,24 @@ export async function listProposals(wsId) {
 // - each step (a decision, a close, an add, the summary) is recorded in the claimed file
 //   as it lands, so if the process dies or a step fails partway, accepting again finishes
 //   the remaining steps instead of applying the done ones twice.
+const proposalKey = (d, summary) => JSON.stringify([d.ws, d.session, String(d.created), d.close || [], d.add || [], d.decide || [], d.unverified || [], String(summary || "").trim()])
+
 export async function acceptProposal(p, opts = {}) {
   const resuming = p.file.endsWith(".accepting")
   const claimed = resuming ? p.file : `${p.file}.accepting`
   if (!resuming) {
-    try { await fs.link(p.file, claimed) } catch (e) {
+    // Reserve the claim name exclusively, then move the proposal onto it in one rename.
+    // Exactly one accept gets the reservation, and the rename moves whatever is published
+    // at that moment, so nothing published meanwhile is deleted unseen.
+    try { await (await fs.open(claimed, "wx")).close() } catch (e) {
       if (e.code === "EEXIST") throw new Error("This proposal is already being accepted; if that was interrupted, accept it again from `ws review`")
+      throw e
+    }
+    try { await fs.rename(p.file, claimed) } catch (e) {
+      await fs.rm(claimed, { force: true })
       if (e.code === "ENOENT") throw new Error("This proposal was already accepted or rejected")
       throw e
     }
-    await fs.rm(p.file, { force: true })
   }
   return store.withLock(claimed, async () => {
     let cur
@@ -539,7 +557,10 @@ export async function acceptProposal(p, opts = {}) {
       if (e.code === "ENOENT") throw new Error("This proposal was already accepted")
       throw e
     }
-    if (cur.data.session !== p.session || String(cur.data.created) !== String(p.created)) {
+    // The reviewer approved a specific proposal; if what's on disk differs in any field
+    // that would be applied (a newer draft for the same session), stop and show it again.
+    if (!resuming && proposalKey(cur.data, cur.content) !== proposalKey(p, p.summary)) {
+      await fs.rename(claimed, p.file).catch(() => {})
       throw new Error("The proposal changed since you opened it; review it again")
     }
     const done = new Set(cur.data.applied_steps || [])

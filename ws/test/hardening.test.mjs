@@ -124,9 +124,9 @@ test("F10: digests redact common credential shapes", () => {
   const out = sum.redact([
     "TOOL: Bash(curl -H 'Authorization: Bearer abcdefghijklmnop123' https://user:hunter22@example.com)",
     "USER: my key is sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA and ghp_123456789012345678901234",
-    "TOOL: Bash(export API_KEY=supersecretvalue)",
+    "TOOL: Bash(export API_KEY=s3cretValue99)",
   ].join("\n"))
-  for (const leaked of ["abcdefghijklmnop123", "hunter22", "sk-ant-api03", "ghp_1234", "supersecretvalue"]) assert.ok(!out.includes(leaked), leaked)
+  for (const leaked of ["abcdefghijklmnop123", "hunter22", "sk-ant-api03", "ghp_1234", "s3cretValue99"]) assert.ok(!out.includes(leaked), leaked)
   assert.match(out, /\[redacted\]/)
 })
 
@@ -230,7 +230,18 @@ test("R2 F04: indented, starred or capitalised records are refused, not dropped"
   await store.decide("r2-parse", "Use tabs")
   const dfile = path.join(store.ROOT, "ws", "r2-parse", "decisions.md")
   await fs.writeFile(dfile, (await fs.readFile(dfile, "utf-8")).replace("- [active]", "- [Active]"))
-  await assert.rejects(store.readDecisions("r2-parse"), /can't read/)
+  await assert.rejects(store.decide("r2-parse", "Use spaces"), /can't read/)
+})
+
+test("R3 F35: a line ws can't parse blocks writes but never hides the workstream", async () => {
+  await store.createWorkstream("r3-sub", { title: "S", prefix: "RS" })
+  await store.addItem("r3-sub", "Parent")
+  const file = path.join(store.ROOT, "ws", "r3-sub", "open.md")
+  await fs.writeFile(file, (await fs.readFile(file, "utf-8")).replace("- [ ] RS-1 Parent", "- [ ] RS-1 Parent\n  - [ ] sub-step"))
+  assert.deepEqual((await store.readOpen("r3-sub")).items.map((i) => i.id), ["RS-1"]) // reads work
+  await store.getWorkstream("r3-sub")
+  await assert.rejects(store.addItem("r3-sub", "x"), /sub-step/) // the write names the line
+  assert.match(await fs.readFile(file, "utf-8"), /sub-step/) // and nothing was dropped
 })
 
 test("R2 C1/F26: atomic writes keep 0600 and write through a symlink", async () => {
@@ -327,4 +338,60 @@ test("R2 F27: URLs must parse, ports must really be numbers", () => {
   assert.equal(validateConfig({ board: { port: [3311] } }).board.port, undefined)
   assert.equal(validateConfig({ board: { port: "3e3" } }).board.port, undefined)
   assert.equal(validateConfig({ llm: { url: "http://127.0.0.1:8000/v1" } }).llm.url, "http://127.0.0.1:8000/v1")
+})
+
+test("R3 X1: redaction leaves ordinary prose alone", () => {
+  for (const prose of ["Fix token: refresh bug in auth", "Repair password: handling failure", "the secret: sauce recipe"]) {
+    assert.equal(sum.redact(prose), prose)
+  }
+})
+
+test("R3 F17/F25: a long digest is cut on line boundaries, so every line keeps its speaker", async () => {
+  const t = path.join(tmp, "long.jsonl")
+  const rows = []
+  for (let i = 0; i < 400; i++) {
+    rows.push(JSON.stringify({ type: "user", message: { content: `request ${i} ` + "x".repeat(150) } }))
+    rows.push(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: `done ${i} ` + "y".repeat(150) }] } }))
+  }
+  await fs.writeFile(t, rows.join("\n") + "\n")
+  const d = await sum.digestTranscript("claude", t)
+  for (const line of d.split("\n").filter(Boolean)) assert.match(line, /^(USER|ASSISTANT|TOOL): |^\[… middle/, line.slice(0, 40))
+})
+
+test("R3 F29/F30: accept refuses a proposal that changed since it was listed, and keeps it", async () => {
+  await store.createWorkstream("r3-acc", { title: "A", prefix: "RC" })
+  const matter = (await import("gray-matter")).default
+  const pfile = path.join(sum.PROPOSALS_DIR, "r3-acc", "p.md")
+  await fs.mkdir(path.dirname(pfile), { recursive: true })
+  const base = { ws: "r3-acc", session: "s-r3", created: "2026-01-01T00:00:00.000Z", close: [], add: [{ text: "Seen" }] }
+  await fs.writeFile(pfile, matter.stringify("\nv1\n", base))
+  const [p] = await sum.listProposals("r3-acc")
+  // A newer draft for the same session lands before the reviewer clicks accept.
+  await fs.writeFile(pfile, matter.stringify("\nv2\n", { ...base, add: [{ text: "Never seen" }] }))
+  await assert.rejects(sum.acceptProposal(p), /changed since you opened it/)
+  assert.deepEqual((await store.readOpen("r3-acc")).items, [])
+  const [still] = await sum.listProposals("r3-acc")
+  assert.equal(still.add[0].text, "Never seen") // the newer draft is kept for review
+  assert.ok(!still.interrupted)
+})
+
+test("R3 F05: many waiters on a stale lock never hold it at the same time", async () => {
+  const file = path.join(tmp, "race-target")
+  const lock = file + ".lock"
+  await fs.mkdir(lock)
+  await fs.writeFile(path.join(lock, "owner"), "dead")
+  const old = new Date(Date.now() - 60_000)
+  await fs.utimes(lock, old, old)
+  // Slow, jittery stats widen every check-then-act window.
+  const realStat = fs.stat.bind(fs)
+  fs.stat = async (...a) => { await new Promise((r) => setTimeout(r, Math.random() * 20)); return realStat(...a) }
+  let inside = 0, max = 0
+  try {
+    await Promise.all(Array.from({ length: 12 }, () => store.withLock(file, async () => {
+      inside++; max = Math.max(max, inside)
+      await new Promise((r) => setTimeout(r, 15))
+      inside--
+    })))
+  } finally { fs.stat = realStat }
+  assert.equal(max, 1)
 })

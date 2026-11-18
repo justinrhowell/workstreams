@@ -60,7 +60,9 @@ export async function writeFileAtomic(file, text) {
   let target = file
   let mode = null
   try {
-    target = await fs.realpath(file)
+    // Follow a symlink even when its target doesn't exist yet (a fresh dotfiles link).
+    if ((await fs.lstat(file)).isSymbolicLink()) target = path.resolve(path.dirname(file), await fs.readlink(file))
+    target = await fs.realpath(target).catch(() => target)
     mode = (await fs.stat(target)).mode & 0o7777
   } catch (e) { if (e.code !== "ENOENT") throw e }
   const tmp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
@@ -80,7 +82,11 @@ export async function createFileAtomic(file, text) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`
   try {
     await fs.writeFile(tmp, text, { flag: "wx" })
-    await fs.link(tmp, file)
+    try { await fs.link(tmp, file) } catch (e) {
+      // Filesystems without hard links (some network and FAT volumes): exclusive create.
+      if (!["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes(e.code)) throw e
+      await fs.writeFile(file, text, { flag: "wx" })
+    }
   } finally {
     await fs.rm(tmp, { force: true }).catch(() => {})
   }
@@ -227,11 +233,14 @@ export async function deleteWorkstream(id) {
     try { queued = (await fs.readdir(qdir)).filter((f) => f.endsWith(".json")) } catch {}
     for (const f of queued) {
       try {
-        const job = JSON.parse(await fs.readFile(path.join(qdir, f), "utf-8"))
-        if (job.ws === id) {
-          await fs.mkdir(path.join(dest, to), { recursive: true })
-          await fs.rename(path.join(qdir, f), path.join(dest, to, f))
-        }
+        // Under the job's lock, the same one a running drain takes to update it.
+        await withLock(path.join(qdir, f), async () => {
+          const job = JSON.parse(await fs.readFile(path.join(qdir, f), "utf-8"))
+          if (job.ws === id) {
+            await fs.mkdir(path.join(dest, to), { recursive: true })
+            await fs.rename(path.join(qdir, f), path.join(dest, to, f))
+          }
+        })
       } catch {}
     }
   }
@@ -330,7 +339,10 @@ export function parseOpen(text) {
     const m = line.match(ITEM_RE)
     // Anything that looks like a checkbox record but doesn't parse exactly is reported,
     // so a hand edit (indent, "*", "[X]") is never dropped by the next write.
-    if (!m) { if (/^\s*[-*+]\s*\[[ xX]?\]/.test(line)) unparsed.push(line); continue }
+    // Any checkbox line that doesn't parse exactly (hand-added, indented, "*", "[X]") is
+    // reported: ws re-renders this file, so the next write would drop it. Writes refuse;
+    // reads still show everything that parsed.
+    if (!m) { if (/^\s*[-*+]\s*\[[^\]]{0,3}\]/.test(line)) unparsed.push(line); continue }
     let rest = m[3]
     let waiting = null
     let closed = null
@@ -372,10 +384,13 @@ export async function readOpen(id) {
   const file = path.join(WS_DIR, id, "open.md")
   const text = await readText(file)
   if (text === null) return { next: 1, items: [], unparsed: [] }
-  const state = parseOpen(text)
-  // Refuse rather than rewrite: writing back would drop the lines we couldn't read.
-  if (state.unparsed.length) throw new Error(`${tildify(file)} has item lines ws can't read; fix them by hand:\n  ${state.unparsed.slice(0, 3).join("\n  ")}`)
-  return state
+  return parseOpen(text)
+}
+
+// Writes refuse a file with record lines they couldn't parse: rewriting would drop them.
+// Reads still work (they show what parsed), so one bad line never hides a workstream.
+function refuseUnparsed(file, state, what) {
+  if (state.unparsed.length) throw new Error(`${tildify(file)} has ${what} lines ws can't read; fix them by hand:\n  ${state.unparsed.slice(0, 3).join("\n  ")}`)
 }
 
 async function writeOpen(id, state, title) {
@@ -386,6 +401,29 @@ async function writeOpen(id, state, title) {
 // seconds, so a live owner is never treated as stale; only a lock untouched for 30s (its
 // process died or froze) is taken over. Release removes the lock only if it is still ours.
 const LOCK_STALE_MS = 30_000
+// Removing a stale lock happens inside a second, short-lived "takeover" lock, and only after
+// re-checking that the lock is still the same stale one. So two waiters can never both
+// remove locks and both proceed (one could otherwise remove the other's fresh lock).
+async function removeIfStale(lock) {
+  const gate = `${lock}.takeover`
+  try { await fs.mkdir(gate) } catch (e) {
+    if (e.code !== "EEXIST") throw e
+    // A takeover that died midway leaves its gate behind; clear it once it's old.
+    try { if (Date.now() - (await fs.stat(gate)).mtimeMs > LOCK_STALE_MS) await fs.rm(gate, { recursive: true, force: true }) } catch {}
+    return
+  }
+  try {
+    const st = await fs.stat(lock).catch(() => null)
+    if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) await fs.rm(lock, { recursive: true, force: true })
+  } finally {
+    await fs.rm(gate, { recursive: true, force: true })
+  }
+}
+
+// A lock is a directory holding its owner's token. The owner refreshes it every few
+// seconds, so a live owner is never treated as stale; only a lock untouched for 30s (its
+// process died or was frozen that long) is taken over. Release removes it only if it is
+// still ours.
 export async function withLock(file, fn) {
   const lock = file + ".lock"
   const token = `${process.pid}-${Math.random().toString(36).slice(2)}`
@@ -393,20 +431,15 @@ export async function withLock(file, fn) {
   for (;;) {
     try { await fs.mkdir(lock); break } catch (e) {
       if (e.code !== "EEXIST") throw e
-      try {
-        if (Date.now() - (await fs.stat(lock)).mtimeMs > LOCK_STALE_MS) {
-          // Take over by renaming: only one waiter can win the rename.
-          const grave = `${lock}.stale-${token}`
-          await fs.rename(lock, grave)
-          await fs.rm(grave, { recursive: true, force: true })
-          continue
-        }
-      } catch {}
+      await removeIfStale(lock).catch(() => {})
       if (Date.now() - start > 10_000) throw new Error(`Timed out waiting for lock ${tildify(lock)}`)
       await new Promise((r) => setTimeout(r, 50))
     }
   }
-  await fs.writeFile(path.join(lock, "owner"), token)
+  try { await fs.writeFile(path.join(lock, "owner"), token) } catch (e) {
+    await fs.rm(lock, { recursive: true, force: true }).catch(() => {})
+    throw e
+  }
   const beat = setInterval(() => { const t = new Date(); fs.utimes(lock, t, t).catch(() => {}) }, 5_000)
   beat.unref?.()
   try { return await fn() } finally {
@@ -421,6 +454,7 @@ async function mutateOpen(id, fn) {
   const ws = await getWorkstream(id)
   const result = await withLock(path.join(ws.dir, "open.md"), async () => {
     const state = await readOpen(id)
+    refuseUnparsed(path.join(ws.dir, "open.md"), state, "item")
     const result = fn(state, ws)
     await writeOpen(id, state, ws.title)
     return result
@@ -567,9 +601,7 @@ export async function readDecisions(id) {
   const file = path.join(WS_DIR, id, "decisions.md")
   const text = await readText(file)
   if (text === null) return { next: 1, decisions: [], unparsed: [] }
-  const state = parseDecisions(text)
-  if (state.unparsed.length) throw new Error(`${tildify(file)} has decision lines ws can't read; fix them by hand:\n  ${state.unparsed.slice(0, 3).join("\n  ")}`)
-  return state
+  return parseDecisions(text)
 }
 
 export async function decide(id, text, { why, rejected, evidence, session, supersedes } = {}) {
@@ -577,6 +609,7 @@ export async function decide(id, text, { why, rejected, evidence, session, super
   const file = path.join(ws.dir, "decisions.md")
   const result = await withLock(file, async () => {
     const state = await readDecisions(id)
+    refuseUnparsed(file, state, "decision")
     let old = null
     if (supersedes) {
       old = state.decisions.find((d) => d.id.toUpperCase() === String(supersedes).toUpperCase())

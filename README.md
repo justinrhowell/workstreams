@@ -11,6 +11,8 @@ A long piece of work (a client site, a migration, a research thread) spans dozen
 
 From those it builds a fresh resume prompt whenever you start a session. Everything is plain markdown on your machine. Nothing is sent anywhere unless you turn on the optional summarizer.
 
+![The ws board: workstreams in Active, Waiting, Parked and Done columns](docs/img/board.png)
+
 ## Quick start
 
 Requires Node 20.9+ on the PATH that Claude Code and Codex see (hooks run `ws` through `#!/usr/bin/env node`), and Claude Code and/or Codex.
@@ -42,6 +44,8 @@ ws board              # http://127.0.0.1:3311
 
 A local web view of every workstream: columns by status, staleness, the inbox, summarizer proposals, and per-workstream detail. It binds to 127.0.0.1 and has no login. It refuses requests from other web pages (cross-origin, DNS rebinding) and requests a typical proxy marks as coming from elsewhere, but headers can be forged, so a program that can reach the port could still get in; so keep it local: never expose it through a tunnel, proxy or `0.0.0.0`. On macOS, `ws board --install` keeps it running in the background.
 
+![A workstream opened on the board: open items, decisions and the resume prompt](docs/img/workstream.png)
+
 ## Parts
 
 | Part | Where | What it does |
@@ -67,5 +71,6 @@ macOS and Linux (CI runs the ws suite on both). The background board service (`w
 - [CONTRIBUTING.md](CONTRIBUTING.md): development setup and how to send changes
 - [TESTING.md](TESTING.md): the test suites
 - [SECURITY.md](SECURITY.md): reporting a vulnerability, and the security boundary
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release
 
 MIT licensed.

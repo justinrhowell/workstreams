@@ -260,6 +260,8 @@ async function cmdLog(id, rest) {
   const file = await store.appendLog(need(id, "<id>"), {
     summary: need(rest.join(" "), "summary"), tool: opt.tool, session: opt.session,
     cwd: store.tildify(process.cwd()), closed: list(opt.closed), added: list(opt.added),
+    // Run by an agent's shell tool? Then only that agent's session may adopt the note.
+    via: process.env.CLAUDECODE || Object.keys(process.env).some((k) => k.startsWith("CODEX_") && k !== "CODEX_HOME") ? "agent" : "terminal",
   })
   console.log(`Logged ${store.tildify(file)}`)
 }

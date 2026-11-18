@@ -175,7 +175,7 @@ server.registerTool(
     },
   },
   safe(async ({ id, summary, tool, closed, added }) => {
-    const file = await store.appendLog(id, { summary, tool, closed, added, cwd: store.tildify(process.cwd()) })
+    const file = await store.appendLog(id, { summary, tool, closed, added, cwd: store.tildify(process.cwd()), via: "agent" })
     return text(`Logged ${store.tildify(file)}`)
   }),
 )

@@ -5,7 +5,9 @@ import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
-import { api, ago, isStale, type Board, type TrashRow, type Workstream } from "./api"
+import { Input } from "@/components/ui/input"
+import { api, ago, isStale, type Board, type SearchResult, type TrashRow, type Workstream } from "./api"
+import { SearchResults } from "./search-results"
 import { WorkstreamSheet } from "./workstream-sheet"
 import { InboxList } from "./inbox-list"
 import { ReviewList } from "./review-list"
@@ -23,6 +25,11 @@ export function BoardApp() {
   const [error, setError] = useState<string | null>(null)
   const [showArchived, setShowArchived] = useState(false)
   const [trash, setTrash] = useState<TrashRow[]>([])
+  const [tab, setTab] = useState("board")
+  const [query, setQuery] = useState("")
+  const [found, setFound] = useState<SearchResult | null>(null)
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const searchBox = useRef<HTMLInputElement | null>(null)
   // Where focus was when a workstream was opened, so closing the panel puts it back there.
   const opener = useRef<HTMLElement | null>(null)
   const open = useCallback((id: string) => {
@@ -49,9 +56,46 @@ export function BoardApp() {
     return () => { clearTimeout(first); clearInterval(t) }
   }, [refresh])
 
+  // Search runs on the server (items, decisions and session logs aren't in the board data).
+  // Debounced; a newer query aborts the older request. State is only set from the timer
+  // or the response, never synchronously in the effect.
+  useEffect(() => {
+    const q = query.trim()
+    const ctrl = new AbortController()
+    const t = setTimeout(async () => {
+      if (!q) { setFound(null); setSearchError(null); return }
+      try {
+        setFound(await api.search(q, ctrl.signal))
+        setSearchError(null)
+      } catch (e) {
+        if (!ctrl.signal.aborted) setSearchError(e instanceof Error ? e.message : String(e))
+      }
+    }, q ? 200 : 0)
+    return () => { clearTimeout(t); ctrl.abort() }
+  }, [query])
+
+  // "/" jumps to the search box from anywhere that isn't a text field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return
+      const el = e.target as HTMLElement | null
+      if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return // a panel or dialog has focus
+      e.preventDefault()
+      // Focus now if the box is on screen; after switching tabs it mounts on the next tick.
+      if (searchBox.current) searchBox.current.focus()
+      else { setTab("board"); setTimeout(() => searchBox.current?.focus(), 0) }
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [])
+
   if (error && !board) return <p role="alert" className="p-8 text-sm text-red-600">Couldn&apos;t read workstreams: {error}</p>
   if (!board) return <p role="status" className="p-8 text-sm text-muted-foreground">Loading…</p>
 
+  // A result for an older query is ignored until the new one arrives.
+  const searching = query.trim() !== "" && found?.query === query.trim() ? found : null
+  const matched = searching ? new Set(searching.workstreams) : null
   const stale = board.workstreams.filter((w) => isStale(w, board.staleDays))
   const archived = board.workstreams.filter((w) => w.status === "archived")
   const columns = showArchived ? [...COLUMNS, { status: "archived", label: "Archived", hint: "hidden everywhere else" }] : COLUMNS
@@ -75,7 +119,7 @@ export function BoardApp() {
         </p>
       </div>
 
-      <Tabs defaultValue="board">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="board">Board</TabsTrigger>
           <TabsTrigger value="inbox">Inbox{board.counts.inbox ? ` (${board.counts.inbox})` : ""}</TabsTrigger>
@@ -83,6 +127,24 @@ export function BoardApp() {
         </TabsList>
 
         <TabsContent value="board" className="mt-4">
+          <div className="mb-4 max-w-xl">
+            <label htmlFor="ws-search" className="sr-only">Search workstreams, items, decisions and sessions</label>
+            <Input
+              id="ws-search"
+              ref={searchBox}
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Escape" && query) { e.preventDefault(); setQuery("") } }}
+              placeholder='Search items, decisions, sessions…  ("phrase", BG-3)   press /'
+              maxLength={200}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {searchError && <p role="alert" className="mt-1 text-xs text-red-600">Search failed: {searchError}</p>}
+          </div>
+          <div aria-live="polite" className="sr-only">{searching ? `${searching.total} ${searching.total === 1 ? "match" : "matches"}` : ""}</div>
+          {searching && <SearchResults result={searching} query={query} onOpen={open} onInbox={() => setTab("inbox")} />}
           {board.broken.length > 0 && (
             <div role="alert" className="mb-3 rounded-md border border-red-300 p-3 text-sm text-red-700 dark:text-red-400">
               {board.broken.length === 1 ? "1 workstream couldn't be read and is hidden" : `${board.broken.length} workstreams couldn't be read and are hidden`} (run <code>ws doctor</code>):
@@ -91,7 +153,7 @@ export function BoardApp() {
               </ul>
             </div>
           )}
-          {stale.length > 0 && (
+          {!searching && stale.length > 0 && (
             <p className="mb-3 text-sm text-amber-700 dark:text-amber-400">
               {stale.length} {stale.length === 1 ? "workstream has" : "workstreams have"} had no session in {board.staleDays}+ days:{" "}
               {stale.map((w, i) => (
@@ -103,7 +165,7 @@ export function BoardApp() {
           )}
           <div className={`grid gap-4 md:grid-cols-2 ${showArchived ? "xl:grid-cols-5" : "xl:grid-cols-4"}`}>
             {columns.map((col) => {
-              const cards = board.workstreams.filter((w) => w.status === col.status)
+              const cards = board.workstreams.filter((w) => w.status === col.status && (!matched || matched.has(w.id)))
               return (
                 <section key={col.status} aria-labelledby={`col-${col.status}`}>
                   <h2 id={`col-${col.status}`} className="mb-2 flex items-baseline gap-2 text-sm font-medium">
@@ -126,7 +188,7 @@ export function BoardApp() {
             })}
           </div>
 
-        {(archived.length > 0 || trash.length > 0) && (
+        {!searching && (archived.length > 0 || trash.length > 0) && (
           <div className="mt-6 space-y-3 border-t pt-4 text-sm">
             {archived.length > 0 && (
               <Button size="sm" variant="ghost" aria-pressed={showArchived} onClick={() => setShowArchived((v) => !v)}>

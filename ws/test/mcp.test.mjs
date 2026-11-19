@@ -25,7 +25,7 @@ const call = async (name, args = {}) => {
 test("lists the expected tools", async () => {
   const { tools } = await client.listTools()
   assert.deepEqual(tools.map((t) => t.name).sort(), [
-    "ws_compose", "ws_decide", "ws_inbox", "ws_item_add", "ws_item_close", "ws_item_edit", "ws_list", "ws_log", "ws_set_status", "ws_show",
+    "ws_compose", "ws_decide", "ws_find", "ws_inbox", "ws_item_add", "ws_item_close", "ws_item_edit", "ws_list", "ws_log", "ws_set_status", "ws_show",
   ])
 })
 

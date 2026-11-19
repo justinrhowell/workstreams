@@ -4,6 +4,7 @@ import * as store from "@/ws/lib/store.mjs"
 import * as capture from "@/ws/lib/capture.mjs"
 import * as summarize from "@/ws/lib/summarize.mjs"
 import { compose } from "@/ws/lib/compose.mjs"
+import { search } from "@/ws/lib/search.mjs"
 
 export const STALE_DAYS = 7
 
@@ -99,6 +100,23 @@ function proposalView(p: any) {
 export async function reviewData() {
   return (await summarize.listProposals()).map(proposalView)
 }
+
+export type SearchHit = {
+  kind: "workstream" | "item" | "decision" | "log" | "inbox"
+  ws: string | null; wsTitle: string | null; wsStatus: string | null
+  id: string; state: string; text: string; snippet: string | null; date: string | null
+  waiting?: string | null; superseded_by?: string | null; tool?: string
+}
+
+export async function searchData(req: Request) {
+  const url = new URL(req.url)
+  const q = (url.searchParams.get("q") || "").slice(0, 200)
+  if (!q.trim()) return { query: "", total: 0, results: [] as SearchHit[], workstreams: [] as string[] }
+  const r = await search(q, { current: url.searchParams.get("current") === "1", limit: 50 })
+  return { query: r.query as string, total: r.total as number, results: r.results as SearchHit[], workstreams: r.workstreams as string[] }
+}
+
+export type SearchResult = Awaited<ReturnType<typeof searchData>>
 
 export async function inboxData() {
   return (await capture.listInbox()).map((r: any) => ({

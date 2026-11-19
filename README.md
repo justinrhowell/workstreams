@@ -35,6 +35,16 @@ ws go site            # edit the resume prompt, then launch Claude Code in that 
 
 Sessions that start in `~/code/acme-site` are told which workstream they're in and what's open. When they end, they're logged against it. Sessions in folders no workstream claims go to `ws inbox`.
 
+To find something later, `ws find` searches every workstream's items, decisions and session logs, plus the inbox:
+
+```bash
+ws find vercel dns          # every word must match one record; "quoted phrase" matches exactly
+ws find BG-3                # an item or decision ID finds that record first
+ws find hosting --current   # leave out closed items, superseded decisions and finished workstreams
+```
+
+Closed items and superseded decisions are listed after current ones and labelled as such. Agents get the same search as the `ws_find` MCP tool, so they can check whether something is already tracked or decided.
+
 ## The board (optional)
 
 ```bash
@@ -42,7 +52,7 @@ npm ci                # once, from the repo root
 ws board              # http://127.0.0.1:3311
 ```
 
-A local web view of every workstream: columns by status, staleness, the inbox, summarizer proposals, and per-workstream detail. It binds to 127.0.0.1 and has no login. It refuses requests from other web pages (cross-origin, DNS rebinding) and requests a typical proxy marks as coming from elsewhere, but headers can be forged, so a program that can reach the port could still get in; so keep it local: never expose it through a tunnel, proxy or `0.0.0.0`. `ws board --install` keeps it running in the background: a launchd agent on macOS, a systemd user unit on Linux.
+A local web view of every workstream: columns by status, staleness, the inbox, summarizer proposals, and per-workstream detail. The search box (press `/`) runs the same search as `ws find`, lists the matches and narrows the columns to workstreams with a match. It binds to 127.0.0.1 and has no login. It refuses requests from other web pages (cross-origin, DNS rebinding) and requests a typical proxy marks as coming from elsewhere, but headers can be forged, so a program that can reach the port could still get in; so keep it local: never expose it through a tunnel, proxy or `0.0.0.0`. `ws board --install` keeps it running in the background: a launchd agent on macOS, a systemd user unit on Linux.
 
 ![A workstream opened on the board: open items, decisions and the resume prompt](docs/img/workstream.png)
 
@@ -50,9 +60,9 @@ A local web view of every workstream: columns by status, staleness, the inbox, s
 
 | Part | Where | What it does |
 |---|---|---|
-| CLI | `ws/bin/ws.mjs` | `setup`, `new`, `go`, `prompt`, `item`, `decide`, `log`, `inbox`, `review`, `stale`, `doctor`, `board`, … (`ws help`) |
+| CLI | `ws/bin/ws.mjs` | `setup`, `new`, `go`, `prompt`, `find`, `item`, `decide`, `log`, `inbox`, `review`, `stale`, `doctor`, `board`, … (`ws help`) |
 | Hooks | `ws hook claude\|codex\|gemini start\|end` | Start: tell the session what's open. End: log it, or put it in the inbox |
-| MCP server | `ws/mcp/server.mjs` | `ws_list`, `ws_show`, `ws_compose`, `ws_item_*`, `ws_decide`, `ws_log`, `ws_set_status`, `ws_inbox` |
+| MCP server | `ws/mcp/server.mjs` | `ws_list`, `ws_show`, `ws_find`, `ws_compose`, `ws_item_*`, `ws_decide`, `ws_log`, `ws_set_status`, `ws_inbox` |
 | Summarizer | `ws/lib/summarize.mjs` | Optional. Drafts notes for sessions that ended without any, using an OpenAI-compatible chat model (self-hosted, or hosted with `llm.model` and an API key). Nothing applies until you accept it |
 | Board | Next.js app in this folder | Local web view (above) |
 

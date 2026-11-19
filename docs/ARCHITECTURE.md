@@ -47,7 +47,7 @@ graph LR
 All writers go through `ws/lib`. That way item IDs are allocated once, the `open.md` lock is always taken, and the opt-in mirror block stays in sync.
 
 - **Writes are atomic:** workstream files, logs, proposals, queue jobs and the settings files `ws setup` edits are written to a temp file and renamed (new files: hard-linked, or created exclusively where the filesystem has no hard links) into place, so a crash leaves the old version or the new one, never half a file. Symlinked files are written through to their target, and file permissions are kept.
-- **Damage is refused, not overwritten:** a missing `open.md` is empty, but an unreadable one, or one with item lines ws can't parse, stops the command with an error instead of being rewritten without them.
+- **Damage is refused, not overwritten:** a missing `open.md` is empty, but an unreadable one, or one with item lines ws can't parse, stops the command with an error instead of being rewritten without them. Other text a person adds to `open.md` or `decisions.md` is kept: indented lines stay under the item or decision above them (for example `owner: Dana`), and anything else moves under a `## Notes` heading.
 - **Record text is one line:** newlines in item and decision text are collapsed, so text can't forge another record. Line endings are normalized, so files edited on Windows still parse.
 - **Locks:** `open.md`, `decisions.md` and `WORKSTREAM.md` changes, session-log adoption and the summary drain each take a lock.
 

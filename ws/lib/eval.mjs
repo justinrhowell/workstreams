@@ -35,8 +35,9 @@ export async function loadFloors() {
 // Pure scoring of one validated proposal against a case.
 export function scoreRun(c, proposal) {
   const expect = new Set((c.expect?.close || []).map((x) => x.toUpperCase()))
-  const v = proposal.close.map((x) => x.id)
-  const u = proposal.unverified.map((x) => x.id)
+  // Each ID counts once: repeating a correct close mustn't make up for a missed one.
+  const v = [...new Set(proposal.close.map((x) => x.id.toUpperCase()))]
+  const u = [...new Set(proposal.unverified.map((x) => x.id.toUpperCase()))].filter((id) => !v.includes(id))
   return {
     tpVerified: v.filter((id) => expect.has(id)).length,
     fpVerified: v.filter((id) => !expect.has(id)),

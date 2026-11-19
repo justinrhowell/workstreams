@@ -2,6 +2,11 @@
 
 All notable changes to ws. Versions follow [semantic versioning](https://semver.org); until 1.0, minor versions may change behaviour.
 
+## Unreleased
+
+### Added
+- **Gemini CLI support** (#5): `ws hook gemini start|end`, a reader for Gemini's session files (the current append-only `.jsonl` log and the older single-object `.json`), summarizer digests, and `ws setup --gemini`, which writes the hooks (millisecond timeouts) and the `ws` MCP server into `~/.gemini/settings.json` in one write. Honours `GEMINI_CLI_HOME`. When Gemini leaves `transcript_path` empty, the session file is found by its id.
+
 ## 0.1.0 — 2026-11-18
 
 First public release.

@@ -1,6 +1,6 @@
 # ws
 
-Workstream state for people who run many Claude Code and Codex sessions on the same piece of work.
+Workstream state for people who run many Claude Code, Codex and Gemini CLI sessions on the same piece of work.
 
 A long piece of work (a client site, a migration, a research thread) spans dozens of sessions. What's still open tends to drift across memory notes, status docs and hand-written resume prompts. `ws` gives each workstream one place for:
 
@@ -15,15 +15,15 @@ From those it builds a fresh resume prompt whenever you start a session. Everyth
 
 ## Quick start
 
-Requires Node 20.9+ on the PATH that Claude Code and Codex see (hooks run `ws` through `#!/usr/bin/env node`), and Claude Code and/or Codex.
+Requires Node 20.9+ on the PATH that your agent CLIs see (hooks run `ws` through `#!/usr/bin/env node`), and at least one of Claude Code, Codex or Gemini CLI (0.26+, which added hooks).
 
 ```bash
 git clone https://github.com/justinrhowell/workstreams.git && cd workstreams
 npm --prefix ws ci
-node ws/bin/ws.mjs setup        # data folder, `ws` on PATH, hooks + MCP for Claude Code and Codex
+node ws/bin/ws.mjs setup        # data folder, `ws` on PATH, hooks + MCP for each CLI it finds
 ```
 
-`ws setup` is safe to re-run: it only adds, updates or de-duplicates hook entries that are entirely ws's, keeps a timestamped backup of any settings file it changes, and updates the MCP registration if the repo or data folder moved. Custom hooks, including ones that call ws inside a larger command, are left alone. Use `--dry-run` to see what it would do, `--claude` / `--codex` to set up one tool, and `ws setup --uninstall` to remove everything it added (your data stays). Codex asks you to approve new hooks once: run `/hooks` in Codex. It honours `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
+`ws setup` is safe to re-run: it only adds, updates or de-duplicates hook entries that are entirely ws's, keeps a timestamped backup of any settings file it changes, and updates the MCP registration if the repo or data folder moved. Custom hooks, including ones that call ws inside a larger command, are left alone. Use `--dry-run` to see what it would do, `--claude` / `--codex` / `--gemini` to set up one tool, and `ws setup --uninstall` to remove everything it added (your data stays). Codex asks you to approve new hooks once: run `/hooks` in Codex. For Gemini CLI, the hooks and the MCP server both go in `~/.gemini/settings.json`. It honours `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME`.
 
 Then create a workstream for a project folder and start working:
 
@@ -51,7 +51,7 @@ A local web view of every workstream: columns by status, staleness, the inbox, s
 | Part | Where | What it does |
 |---|---|---|
 | CLI | `ws/bin/ws.mjs` | `setup`, `new`, `go`, `prompt`, `item`, `decide`, `log`, `inbox`, `review`, `stale`, `doctor`, `board`, … (`ws help`) |
-| Hooks | `ws hook claude\|codex start\|end` | Start: tell the session what's open. End: log it, or put it in the inbox |
+| Hooks | `ws hook claude\|codex\|gemini start\|end` | Start: tell the session what's open. End: log it, or put it in the inbox |
 | MCP server | `ws/mcp/server.mjs` | `ws_list`, `ws_show`, `ws_compose`, `ws_item_*`, `ws_decide`, `ws_log`, `ws_set_status`, `ws_inbox` |
 | Summarizer | `ws/lib/summarize.mjs` | Optional. Drafts notes for sessions that ended without any, using an OpenAI-compatible chat model (self-hosted, or hosted with `llm.model` and an API key). Nothing applies until you accept it |
 | Board | Next.js app in this folder | Local web view (above) |

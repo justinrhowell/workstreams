@@ -1,6 +1,6 @@
 # Architecture
 
-`ws` keeps the state of long-running work (a **workstream**) that spans many Claude Code and Codex sessions. From that state it builds a fresh resume prompt whenever a session starts.
+`ws` keeps the state of long-running work (a **workstream**) that spans many Claude Code, Codex and Gemini CLI sessions. From that state it builds a fresh resume prompt whenever a session starts.
 
 ## Each fact has one owner
 
@@ -37,7 +37,7 @@ $WS_ROOT (default $XDG_DATA_HOME/ws or ~/.local/share/ws; never inside this repo
 ```mermaid
 graph LR
   CLI[ws CLI] --> LIB[ws/lib]
-  HOOKS[SessionStart / SessionEnd hooks<br/>Claude Code + Codex] --> LIB
+  HOOKS[SessionStart / SessionEnd hooks<br/>Claude Code, Codex, Gemini CLI] --> LIB
   MCP[ws MCP server] --> LIB
   BOARD[Board: Next app, 127.0.0.1] --> LIB
   LIB --> FS[(WS_ROOT markdown)]
@@ -57,6 +57,7 @@ All writers go through `ws/lib`. That way item IDs are allocated once, the `open
   - **Matching:** a session links to a workstream when `WS_ID` is set, or when exactly one active workstream has the longest matching cwd prefix. Everything else goes to the inbox, with ranked suggestions.
   - **Filtering:** tiny sessions (one prompt, few tool calls, no edits, no ws calls) are skipped. A `ws log` written during the session is adopted rather than duplicated. With several sessions in one workstream, a session adopts a note whose text appears in its own `ws log`/`ws_log` call; a note an agent wrote (`via: agent`, from MCP or an agent's shell) is never taken by a session that logged nothing; a note typed in a terminal goes to the session that ends first.
   - **Start note:** returned as `hookSpecificOutput.additionalContext`, and it defers to the user.
+  - **Transcripts:** Claude Code and Codex write one event per line. Gemini CLI writes an append-only log that re-appends a message whenever it changes and records rewinds and patches, so `gemini.mjs` folds it into the final message list before anything is counted.
 - **`summarize.mjs`** drafts proposals for sessions that ended without notes. The hook only enqueues; a detached `ws summarize --drain` does the work.
   - **Model input:** a digest of the session (your prompts, assistant text, tool names with the first 140 characters of each tool's main argument; no tool output), with common credential shapes redacted first, sent in JSON mode. Server-specific fields (for example turning thinking off on vLLM) come from `llm.extraBody` in config. The reply must finish with `stop`.
   - **Validation:** a close must quote an assistant or tool line verbatim (never the user's request), must not copy the item text, and must share words with the item. A decision must quote the user. Anything that fails becomes an *unverified* suggestion, off by default. New items that restate open ones are dropped. Accepting is exclusive: the first accept claims the proposal, a second one is refused, and if a newer draft replaced it since you opened it, the accept stops so you can review the new one. Each step (decision, close, add, summary) is recorded right after it lands, so an accept interrupted by a crash or an error shows up again in `ws review`, and accepting it again skips the recorded steps. A crash in the instant between a step and its record can repeat that one step. A step that fails softly (for example closing an item someone already closed) is reported in the result and counted as done.

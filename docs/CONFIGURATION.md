@@ -70,9 +70,10 @@ Tool output is never sent, including the output of `!` shell commands and slash 
 | `WS_NO_SPAWN` | | Hooks don't start the background summarizer (used in tests) |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Where Claude Code's settings and transcripts are; `ws setup` writes hooks there |
 | `CODEX_HOME` | `~/.codex` | Same for Codex |
+| `GEMINI_CLI_HOME` | your home folder | Gemini CLI keeps `.gemini/` (settings and transcripts) here |
 | `VISUAL`, `EDITOR` | | Editor for `ws go` (`VISUAL` first, then `EDITOR`, then `nano`); run through `sh`, so arguments and quoted paths work |
 
-The summarizer runs as a detached process started by the hooks, so its API key variable must be visible to Claude Code or Codex, not just to your terminal.
+The summarizer runs as a detached process started by the hooks, so its API key variable must be visible to the agent CLI, not just to your terminal. Gemini CLI can redact variables whose names contain `KEY`, `TOKEN` or `SECRET` from hook environments (environment-variable redaction): with that on, a hosted model's key won't reach the summarizer from a Gemini session. A self-hosted model without a key is unaffected, and `ws summarize --drain` from a terminal always works.
 
 ## Other files in the data folder
 
@@ -135,6 +136,22 @@ Claude Code, in `~/.claude/settings.json`:
 ```
 
 Codex, in `~/.codex/hooks.json`: the same shape, with `ws hook codex start` (timeout 10) and `ws hook codex end` (timeout 3). Approve them once with `/hooks` in Codex.
+
+Gemini CLI, in `~/.gemini/settings.json`: the same shape, but timeouts are in **milliseconds**, and the MCP server goes in the same file:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "ws hook gemini start", "timeout": 10000 }] }],
+    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "ws hook gemini end", "timeout": 5000 }] }]
+  },
+  "mcpServers": {
+    "ws": { "command": "node", "args": ["/path/to/workstreams/ws/mcp/server.mjs"] }
+  }
+}
+```
+
+Gemini CLI doesn't record whether a session was a scripted `gemini -p` run, so those are treated like interactive sessions: a one-shot run outside any workstream's folder is still dropped as too small, but a longer scripted run there can reach the inbox. Add its folder to `ignore.txt` if that happens.
 
 Use an absolute path to `ws` if `~/.local/bin` isn't on the PATH those tools see.
 

@@ -368,7 +368,7 @@ export function parseOpen(text) {
     // reads still show everything that parsed.
     if (!m) {
       if (/^\s*[-*+]\s*\[[^\]]{0,3}\]/.test(line)) { unparsed.push(line); cur = null }
-      else if (!line.trim() || MANAGED_LINE.test(line)) { if (!line.trim()) cur = null }
+      else if (!line.trim() || MANAGED_LINE.test(line)) {} // blank lines don't end a record
       else if (cur && /^\s/.test(line)) cur.extra.push(line.trim())
       else { notes.push(line); cur = null }
       continue
@@ -378,7 +378,7 @@ export function parseOpen(text) {
     let rest = m[3]
     let waiting = null
     let closed = null
-    const c = m[1] === "x" && rest.match(/ \(closed ([^)]*)\)$/)
+    const c = m[1] === "x" && rest.match(/ \(closed ([^()]*)\)$/)
     if (c) { closed = c[1] || null; rest = rest.slice(0, -c[0].length) }
     const w = rest.match(/ @waiting:(\S*)$/)
     if (w) { waiting = w[1].replace(/_/g, " ") || null; rest = rest.slice(0, -w[0].length) }
@@ -464,7 +464,14 @@ async function removeIfStale(lock) {
   }
   try {
     const st = await fs.stat(lock).catch(() => null)
-    if (st && (await isStale(lock, st))) await fs.rm(lock, { recursive: true, force: true })
+    if (!st || !(await isStale(lock, st))) return
+    // Its owner may have released it and someone else taken the path while we looked:
+    // only remove the very directory (same inode, same owner token) that was judged stale.
+    // A window of microseconds remains; closing it fully would need an OS-level lock.
+    const owner = await fs.readFile(path.join(lock, "owner"), "utf-8").catch(() => null)
+    const now = await fs.stat(lock).catch(() => null)
+    const ownerNow = await fs.readFile(path.join(lock, "owner"), "utf-8").catch(() => null)
+    if (now && now.ino === st.ino && now.mtimeMs === st.mtimeMs && owner === ownerNow) await fs.rm(lock, { recursive: true, force: true })
   } finally {
     await fs.rm(gate, { recursive: true, force: true })
   }
@@ -626,7 +633,7 @@ export function parseDecisions(text) {
     const f = line.match(/^\s+([a-z_]+):\s?(.*)$/)
     if (cur && f && DEC_FIELDS.includes(f[1])) cur[f[1]] = f[2].trim()
     else if (cur && /^\s+\S/.test(line)) cur.extra.push(line.trim()) // other fields (owner: …) and continuation lines
-    else if (!line.trim() || MANAGED_LINE.test(line)) { if (!line.trim()) cur = null }
+    else if (!line.trim() || MANAGED_LINE.test(line)) {} // blank lines don't end a record: fields after one still belong to it
     else { notes.push(line); cur = null }
   }
   const maxN = Math.max(0, ...decisions.map((d) => Number(d.id.split("-D").pop())))

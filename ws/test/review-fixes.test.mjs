@@ -132,6 +132,8 @@ test("redaction: quoted credential values are redacted through the closing quote
     [`mysql -u app -p'SafePass42' db`, `mysql -u app -p'[redacted]' db`],
     [`mysql -u app -p"Safe Pass42" db`, `mysql -u app -p"[redacted]" db`],
     [`mysql -u app -pSafePass42 db`, `mysql -u app -p[redacted] db`],
+    [String.raw`docker login --password "alpha\"beta123"`, `docker login --password "[redacted]"`],
+    [`token: "release notes password=abc12345"`, `token: "release notes password=[redacted]"`],
   ]
   for (const [text, want] of cases) assert.equal(sum.redact(text), want)
   // Quoted prose after a token-type key still survives.

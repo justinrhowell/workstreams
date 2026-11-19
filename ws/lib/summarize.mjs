@@ -150,13 +150,15 @@ const Q = String.raw`(?:\\?["'])?`
 const VAL = String.raw`[^\s"'\\&,;|]`
 // A credential value: quoted (plain or JSON-escaped), redacted through its closing quote
 // even if it holds spaces or punctuation; or unquoted, up to the next delimiter.
-const VALUE = String.raw`(\\"(?:(?!\\").)*\\"|"[^"\n]*"|'[^'\n]*'|${VAL}+)`
+const VALUE = String.raw`(\\"(?:(?!\\").)*\\"|"(?:[^"\\\n]|\\.)*"|'[^'\n]*'|${VAL}+)`
 // Replacer for a (prefix)(value) match: keeps the prefix and any quotes, and redacts the
-// value when `ok(contents, prefix)` accepts it.
+// value when `ok(contents, prefix)` accepts it. A double-quoted value may hold \" escapes.
 const mask = (ok = () => true) => (m, pre, v) => {
   const q = v.startsWith('\\"') ? '\\"' : /^["']/.test(v) ? v[0] : ""
   const inner = q ? v.slice(q.length, -q.length) : v
-  return inner && ok(inner, pre) ? `${pre}${q}[redacted]${q}` : m
+  if (inner && ok(inner, pre)) return `${pre}${q}[redacted]${q}`
+  // Not a credential itself, but it may hold one (token: "notes password=abc12345").
+  return q && inner ? `${pre}${q}${redact(inner)}${q}` : m
 }
 const SECRET_PATTERNS = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted key]"],

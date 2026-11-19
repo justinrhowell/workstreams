@@ -140,23 +140,54 @@ const clip = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s)
 // Deterministic, before anything leaves the machine: common credential shapes in
 // prompts, assistant text and tool arguments are replaced. This is a safety net,
 // not a guarantee; see docs/CONFIGURATION.md ("Privacy").
+// A quote may arrive JSON-escaped (\" inside Codex tool arguments), so quote positions
+// accept an optional backslash and values stop at one.
+const Q = String.raw`(?:\\?["'])?`
+const VAL = String.raw`[^\s"'\\&,;|]`
 const SECRET_PATTERNS = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted key]"],
   [/\b(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,})/g, "[redacted]"],
   [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, "[redacted]"],
   [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, "[redacted]"],
   [/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted]"],
+  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}/g, "[redacted]"], // Stripe secret / restricted keys
+  [/\bAIza[0-9A-Za-z_-]{35}/g, "[redacted]"], // Google API keys
+  [/\bglpat-[A-Za-z0-9_-]{20,}/g, "[redacted]"], // GitLab
+  [/\bnpm_[A-Za-z0-9]{36}\b/g, "[redacted]"], // npm
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, "[redacted jwt]"],
   [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [redacted]"],
-  // key=value / key: value, but only when the value looks like a credential (8+ chars with
-  // both letters and digits), so prose like "token: refresh bug" survives.
-  [/((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)["']?\s*[:=]\s*["']?)(?=[^\s"'&,;]*\d)(?=[^\s"'&,;]*[A-Za-z])[^\s"'&,;]{8,}/gi, "$1[redacted]"],
+  // Shell-style NAME=value where the name says it is a credential (AWS_SECRET_ACCESS_KEY,
+  // DB_PASSWORD, GITHUB_TOKEN): redacted whatever the value looks like.
+  [new RegExp(String.raw`\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*=${Q})${VAL}{4,}`, "g"), "$1[redacted]"],
+  // key=value / key: value in any case, but only when the value looks like a credential
+  // (8+ chars with both letters and digits), so prose like "token: refresh bug" survives.
+  [new RegExp(String.raw`((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)[A-Za-z0-9_-]*${Q}\s*[:=]\s*${Q})(?=${VAL}*\d)(?=${VAL}*[A-Za-z])${VAL}{8,}`, "gi"), "$1[redacted]"],
+  // Credentials passed as command-line flags.
+  [new RegExp(String.raw`((?:^|\s)--password[= ]${Q})${VAL}+`, "g"), "$1[redacted]"],
+  [new RegExp(String.raw`((?:^|\s)(?:-u|--user)\s+${Q}[^\s:"'\\]+:)${VAL}+`, "g"), "$1[redacted]"],
+  [new RegExp(String.raw`(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]*?\s-p)${VAL}+`, "g"), "$1[redacted]"],
   [/(\/\/)[^/\s:@]+:[^/\s@]+@/g, "$1[redacted]@"],
 ]
 export function redact(text) {
   let out = String(text)
   for (const [re, sub] of SECRET_PATTERNS) out = out.replace(re, sub)
   return out
+}
+
+// Codex tool arguments are a JSON string ({"command": [...]} or {"cmd": "..."}). Decode
+// it so the digest shows the command itself, with real quotes for redaction to see.
+function codexCommand(raw) {
+  if (raw == null) return ""
+  if (typeof raw === "string") {
+    try { raw = JSON.parse(raw) } catch { return raw }
+  }
+  if (raw && typeof raw === "object") {
+    const c = raw.cmd ?? raw.command
+    if (Array.isArray(c)) return c.map(String).join(" ")
+    if (typeof c === "string") return c
+    return JSON.stringify(raw)
+  }
+  return String(raw)
 }
 
 function toolHint(name, input = {}) {
@@ -204,7 +235,7 @@ export async function digestTranscript(tool, file) {
       } else if (p.type === "item_completed" && p.item?.type === "McpToolCall") {
         lines.push(`TOOL: ${p.item.server}.${p.item.tool}`)
       } else if (p.type === "custom_tool_call" || p.type === "function_call") {
-        lines.push(`TOOL: ${toolHint(p.name, { command: String(p.input ?? p.arguments ?? "") })}`)
+        lines.push(`TOOL: ${toolHint(p.name, { command: codexCommand(p.input ?? p.arguments) })}`)
       }
     }
   }

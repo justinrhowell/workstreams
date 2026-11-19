@@ -83,6 +83,14 @@ export function BoardApp() {
         </TabsList>
 
         <TabsContent value="board" className="mt-4">
+          {board.broken.length > 0 && (
+            <div role="alert" className="mb-3 rounded-md border border-red-300 p-3 text-sm text-red-700 dark:text-red-400">
+              {board.broken.length === 1 ? "1 workstream couldn't be read and is hidden" : `${board.broken.length} workstreams couldn't be read and are hidden`} (run <code>ws doctor</code>):
+              <ul className="mt-1 list-disc pl-5 text-xs">
+                {board.broken.map((b) => <li key={b.id}><span className="font-mono">{b.id}</span>: {b.error}</li>)}
+              </ul>
+            </div>
+          )}
           {stale.length > 0 && (
             <p className="mb-3 text-sm text-amber-700 dark:text-amber-400">
               {stale.length} {stale.length === 1 ? "workstream has" : "workstreams have"} had no session in {board.staleDays}+ days:{" "}

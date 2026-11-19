@@ -103,14 +103,26 @@ export function defaultPrefix(id) {
 
 // ---------------------------------------------------------------- workstreams
 
-export async function listWorkstreams() {
+// One unreadable workstream (a hand-edit that broke the YAML, a bad `ws set`, a stray
+// folder) must not hide the others: hooks, ls, MCP and the board all list through here.
+// It is skipped, and pushed onto `broken` for callers that report problems.
+export async function listWorkstreams({ broken } = {}) {
   let ids = []
   try { ids = await fs.readdir(WS_DIR) } catch { return [] }
   const out = []
   for (const id of ids) {
     if (id.startsWith(".")) continue
     if (!(await exists(path.join(WS_DIR, id, "WORKSTREAM.md")))) continue
-    out.push(await getWorkstream(id))
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
+      broken?.push({ id, error: "folder name isn't a workstream id (lowercase letters, digits and dashes)" })
+      continue
+    }
+    try {
+      out.push(await getWorkstream(id))
+    } catch (e) {
+      // YAML errors carry a multi-line code frame; the first line says what and where.
+      broken?.push({ id, error: String(e instanceof Error ? e.message : e).split("\n")[0].replace(/:\s*$/, "") })
+    }
   }
   return out.sort((a, b) => b.lastActivity - a.lastActivity)
 }

@@ -120,3 +120,40 @@ test("a relative cwd already on disk never claims a session", async () => {
   const doctor = ws(["doctor", "legacy"])
   assert.match(doctor.stdout, /cwd must be an absolute folder/)
 })
+
+test("redaction: quoted credential values are redacted through the closing quote", () => {
+  const cases = [
+    [`export DB_PASSWORD="alpha beta123"`, `export DB_PASSWORD="[redacted]"`],
+    [`DB_PASSWORD='a,b;c\\d'`, `DB_PASSWORD='[redacted]'`],
+    [String.raw`{"cmd":"export DB_PASSWORD=\"two words9\""}`, String.raw`{"cmd":"export DB_PASSWORD=\"[redacted]\""}`],
+    [`docker login --password "two words9"`, `docker login --password "[redacted]"`],
+    [`password="alpha beta123"`, `password="[redacted]"`],
+    [`DB_PASSWORD=abc`, `DB_PASSWORD=[redacted]`],
+    [`mysql -u app -p'SafePass42' db`, `mysql -u app -p'[redacted]' db`],
+    [`mysql -u app -p"Safe Pass42" db`, `mysql -u app -p"[redacted]" db`],
+    [`mysql -u app -pSafePass42 db`, `mysql -u app -p[redacted] db`],
+    [String.raw`docker login --password "alpha\"beta123"`, `docker login --password "[redacted]"`],
+    [`token: "release notes password=abc12345"`, `token: "release notes password=[redacted]"`],
+  ]
+  for (const [text, want] of cases) assert.equal(sum.redact(text), want)
+  // Quoted prose after a token-type key still survives.
+  for (const text of [`token: "upgrade to v2 next week"`, `set token="" before retrying`]) assert.equal(sum.redact(text), text)
+})
+
+test("a workstream folder that can't be read is reported, not silently skipped", { skip: process.getuid?.() === 0 }, async () => {
+  const good = await folder("good2")
+  await store.createWorkstream("good2", { title: "Good", cwd: good })
+  await store.createWorkstream("locked", { title: "Locked", cwd: await folder("locked") })
+  const dir = path.join(store.ROOT, "ws", "locked")
+  await fs.chmod(dir, 0o000)
+  try {
+    const broken = []
+    const list = await store.listWorkstreams({ broken })
+    assert.ok(list.some((w) => w.id === "good2"))
+    assert.deepEqual(broken.map((b) => b.id), ["locked"])
+    assert.match(broken[0].error, /can't read WORKSTREAM\.md \(EACCES\)/)
+  } finally {
+    await fs.chmod(dir, 0o755)
+    await fs.rm(dir, { recursive: true })
+  }
+})

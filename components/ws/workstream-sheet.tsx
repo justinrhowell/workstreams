@@ -41,16 +41,19 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
     return () => clearTimeout(t)
   }, [load])
 
-  async function act(body: Record<string, unknown>, done?: string) {
-    if (!id) return
+  // Resolves true when the change was saved, so callers only clear input or close on success.
+  async function act(body: Record<string, unknown>, done?: string): Promise<boolean> {
+    if (!id) return false
     setBusy(true)
     try {
       await api.act(id, body)
       if (done) toast.success(done)
       await load()
       onChange()
+      return true
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e))
+      return false
     } finally {
       setBusy(false)
     }
@@ -142,7 +145,7 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
                 onSubmit={(e) => {
                   e.preventDefault()
                   if (!newItem.trim()) return
-                  act({ action: "add", text: newItem, waiting: newWaiting.trim() || undefined }, "Added").then(() => { setNewItem(""); setNewWaiting("") })
+                  act({ action: "add", text: newItem, waiting: newWaiting.trim() || undefined }, "Added").then((ok) => { if (ok) { setNewItem(""); setNewWaiting("") } })
                 }}
               >
                 <Input value={newItem} onChange={(e) => setNewItem(e.target.value)} placeholder="New open item" aria-label="New open item" />
@@ -231,7 +234,7 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
               {d.status === "archived" ? (
                 <Button size="sm" variant="outline" disabled={busy} onClick={() => act({ action: "unarchive" }, "Unarchived")}>Unarchive</Button>
               ) : (
-                <Button size="sm" variant="outline" disabled={busy} onClick={() => act({ action: "archive" }, "Archived").then(onClose)}>Archive</Button>
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => act({ action: "archive" }, "Archived").then((ok) => ok && onClose())}>Archive</Button>
               )}
               <AlertDialog>
                 <AlertDialogTrigger asChild>
@@ -247,7 +250,7 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
                   </AlertDialogHeader>
                   <AlertDialogFooter>
                     <AlertDialogCancel>Cancel</AlertDialogCancel>
-                    <AlertDialogAction onClick={() => act({ action: "delete" }, "Moved to trash").then(onClose)}>Move to trash</AlertDialogAction>
+                    <AlertDialogAction onClick={() => act({ action: "delete" }, "Moved to trash").then((ok) => ok && onClose())}>Move to trash</AlertDialogAction>
                   </AlertDialogFooter>
                 </AlertDialogContent>
               </AlertDialog>

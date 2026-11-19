@@ -85,7 +85,7 @@ The board is the Next app at `/`. Its API routes import `ws/lib` directly.
 ## Platforms
 
 - **macOS:** everything, including `ws board --install` (a launchd agent).
-- **Linux:** everything except the background board service; run `ws board` in a terminal instead. Clipboard copy uses `wl-copy`, `xclip` or `xsel`.
+- **Linux:** everything. `ws board --install` writes a systemd user unit to `~/.config/systemd/user/<label>.service` (honouring `XDG_CONFIG_HOME`) and enables it with `systemctl --user`; logs go to the journal (`journalctl --user -u ws.board.service`). User services stop when you log out unless you run `loginctl enable-linger`. Without `systemctl --user` (some containers, WSL without systemd), run `ws board` in a terminal. Clipboard copy uses `wl-copy`, `xclip` or `xsel`.
 - **Windows:** untested. WSL should behave like Linux.
 
 ## History

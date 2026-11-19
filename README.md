@@ -42,7 +42,7 @@ npm ci                # once, from the repo root
 ws board              # http://127.0.0.1:3311
 ```
 
-A local web view of every workstream: columns by status, staleness, the inbox, summarizer proposals, and per-workstream detail. It binds to 127.0.0.1 and has no login. It refuses requests from other web pages (cross-origin, DNS rebinding) and requests a typical proxy marks as coming from elsewhere, but headers can be forged, so a program that can reach the port could still get in; so keep it local: never expose it through a tunnel, proxy or `0.0.0.0`. On macOS, `ws board --install` keeps it running in the background.
+A local web view of every workstream: columns by status, staleness, the inbox, summarizer proposals, and per-workstream detail. It binds to 127.0.0.1 and has no login. It refuses requests from other web pages (cross-origin, DNS rebinding) and requests a typical proxy marks as coming from elsewhere, but headers can be forged, so a program that can reach the port could still get in; so keep it local: never expose it through a tunnel, proxy or `0.0.0.0`. `ws board --install` keeps it running in the background: a launchd agent on macOS, a systemd user unit on Linux.
 
 ![A workstream opened on the board: open items, decisions and the resume prompt](docs/img/workstream.png)
 
@@ -62,7 +62,7 @@ Your data lives in `$WS_ROOT`, which defaults to `$XDG_DATA_HOME/ws` or `~/.loca
 
 ## Platforms
 
-macOS and Linux (CI runs the ws suite on both). The background board service (`ws board --install`) is macOS-only for now. Native Windows isn't supported (hooks and paths assume a POSIX shell); use WSL.
+macOS and Linux (CI runs the ws suite on both). The background board service (`ws board --install`) uses launchd on macOS and `systemctl --user` on Linux. Native Windows isn't supported (hooks and paths assume a POSIX shell); use WSL.
 
 ## More
 

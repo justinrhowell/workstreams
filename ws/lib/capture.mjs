@@ -91,6 +91,8 @@ function parseCodex(d, info) {
   if (p.type === "custom_tool_call" || p.type === "function_call") {
     info.toolCalls++
     const input = String(p.input ?? p.arguments ?? "")
+    if (/^mcp__ws__ws_(item_|log|set_status)/.test(p.name || "")) info.wsCalls.push(p.name)
+    if (p.name === "mcp__ws__ws_log") info.logCalls.push(input.slice(0, 4000))
     for (const m of input.matchAll(PATCH_RE)) info.files.add(m[1].trim())
     shellWrites(input, info.files)
     if (/\bws (item|log)\b/.test(input)) info.wsCalls.push(input.slice(0, 200))
@@ -186,7 +188,7 @@ async function findSessionLog(wsId, sessionId) {
 // Several sessions can run in one workstream at once, so a session must not take notes
 // another agent session wrote:
 //   1. a note whose text appears in one of this session's own `ws log` / ws_log calls is its own;
-//   2. a note an agent wrote (via: agent) is only taken by a session that logged something;
+//   2. a note an agent wrote (via: agent) is never taken otherwise: its own session's calls hold its text;
 //   3. a note typed in a terminal (or of unknown origin) goes to whichever session ends first.
 const squash = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "")
 async function findAdoptableManualLog(wsId, started, ended, logCalls = []) {
@@ -195,12 +197,11 @@ async function findAdoptableManualLog(wsId, started, ended, logCalls = []) {
   const t1 = new Date(ended).getTime() + 5 * 60_000
   const open = ws.logs.filter((l) => !l.session && l.source === "manual" && l.mtimeMs >= t0 && l.mtimeMs <= t1)
   const calls = logCalls.map(squash)
-  const mine = open.find((l) => {
-    const k = squash(String(l.summary).split("\n")[0]).slice(0, 40)
-    return k && calls.some((c) => c.includes(k))
-  })
+  const key = (l) => squash(String(l.summary).split("\n")[0]).slice(0, 400)
+  // The longest match wins, so of two notes that start alike the one this session wrote in full is taken.
+  const mine = open.filter((l) => key(l) && calls.some((c) => c.includes(key(l)))).sort((a, b) => key(b).length - key(a).length)[0]
   if (mine) return mine
-  return open.find((l) => l.via !== "agent" || calls.length > 0) || null
+  return open.find((l) => l.via !== "agent") || null
 }
 
 async function writeLogFile(file, data, body) {

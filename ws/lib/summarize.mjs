@@ -148,6 +148,16 @@ const clip = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s)
 // accept an optional backslash and values stop at one.
 const Q = String.raw`(?:\\?["'])?`
 const VAL = String.raw`[^\s"'\\&,;|]`
+// A credential value: quoted (plain or JSON-escaped), redacted through its closing quote
+// even if it holds spaces or punctuation; or unquoted, up to the next delimiter.
+const VALUE = String.raw`(\\"(?:(?!\\").)*\\"|"[^"\n]*"|'[^'\n]*'|${VAL}+)`
+// Replacer for a (prefix)(value) match: keeps the prefix and any quotes, and redacts the
+// value when `ok(contents, prefix)` accepts it.
+const mask = (ok = () => true) => (m, pre, v) => {
+  const q = v.startsWith('\\"') ? '\\"' : /^["']/.test(v) ? v[0] : ""
+  const inner = q ? v.slice(q.length, -q.length) : v
+  return inner && ok(inner, pre) ? `${pre}${q}[redacted]${q}` : m
+}
 const SECRET_PATTERNS = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted key]"],
   [/\b(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,})/g, "[redacted]"],
@@ -161,15 +171,18 @@ const SECRET_PATTERNS = [
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, "[redacted jwt]"],
   [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [redacted]"],
   // Shell-style NAME=value where the name says it is a credential (AWS_SECRET_ACCESS_KEY,
-  // DB_PASSWORD, GITHUB_TOKEN): redacted whatever the value looks like.
-  [new RegExp(String.raw`\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*=${Q})${VAL}{4,}`, "g"), "$1[redacted]"],
+  // DB_PASSWORD, GITHUB_TOKEN): redacted whatever the value looks like, however short.
+  [new RegExp(String.raw`\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*=)${VALUE}`, "g"), mask()],
   // key=value / key: value in any case, but only when the value looks like a credential
   // (8+ chars with both letters and digits), so prose like "token: refresh bug" survives.
-  [new RegExp(String.raw`((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)[A-Za-z0-9_-]*${Q}\s*[:=]\s*${Q})(?=${VAL}*\d)(?=${VAL}*[A-Za-z])${VAL}{8,}`, "gi"), "$1[redacted]"],
+  // A quoted value with spaces counts only after a password-type key, so quoted prose
+  // ("token: \"upgrade to v2 next week\"") is left alone.
+  [new RegExp(String.raw`((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)[A-Za-z0-9_-]*${Q}\s*[:=]\s*)${VALUE}`, "gi"),
+    mask((v, pre) => v.length >= 8 && /\d/.test(v) && /[A-Za-z]/.test(v) && (!/\s/.test(v) || /pass|pwd|secret/i.test(pre)))],
   // Credentials passed as command-line flags.
-  [new RegExp(String.raw`((?:^|\s)--password[= ]${Q})${VAL}+`, "g"), "$1[redacted]"],
+  [new RegExp(String.raw`((?:^|\s)--password[= ])${VALUE}`, "g"), mask()],
   [new RegExp(String.raw`((?:^|\s)(?:-u|--user)\s+${Q}[^\s:"'\\]+:)${VAL}+`, "g"), "$1[redacted]"],
-  [new RegExp(String.raw`(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]*?\s-p)${VAL}+`, "g"), "$1[redacted]"],
+  [new RegExp(String.raw`(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]*?\s-p)${VALUE}`, "g"), mask()],
   [/(\/\/)[^/\s:@]+:[^/\s@]+@/g, "$1[redacted]@"],
 ]
 export function redact(text) {

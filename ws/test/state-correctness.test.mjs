@@ -90,3 +90,12 @@ test("summarizer input and validation", async () => {
   const p = sum.validateProposal(JSON.stringify({ summary: "x", close: [{ id: closedId, quote: "q q q q q", why: "w" }] }), open, "q q q q q")
   assert.equal(p.close.length + p.unverified.length, 0)
 })
+
+test("search (ws_find, ws find --current) marks closed and superseded records as history", async () => {
+  const found = (await client.callTool({ name: "ws_find", arguments: { query: "zombie" } })).content[0].text
+  for (const line of found.split("\n").filter((l) => /ZOMBIE/.test(l))) {
+    assert.match(line, /^\[(closed item|superseded decision)/, `ws_find showed history as current: ${line}`)
+  }
+  const current = (await client.callTool({ name: "ws_find", arguments: { query: "zombie", current: true } })).content[0].text
+  assert.doesNotMatch(current, /ZOMBIE/, "ws_find current:true leaked history")
+})

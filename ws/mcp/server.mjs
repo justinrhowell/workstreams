@@ -10,6 +10,7 @@ import * as store from "../lib/store.mjs"
 import { platformProblem } from "../lib/platform.mjs"
 import { compose } from "../lib/compose.mjs"
 import * as capture from "../lib/capture.mjs"
+import { search, formatResult, KINDS } from "../lib/search.mjs"
 
 const text = (value) => ({ content: [{ type: "text", text: value }] })
 const fail = (e) => ({ content: [{ type: "text", text: `Error: ${e.message}` }], isError: true })
@@ -41,6 +42,29 @@ server.registerTool(
       rows.push(`- ${w.id} [${w.status}] ${w.title}: ${open} open${w.waiting_on ? `; waiting on ${w.waiting_on}` : ""}${w.cwd ? `; cwd ${store.tildify(w.cwd)}` : ""}`)
     }
     return text(rows.join("\n"))
+  }),
+)
+
+server.registerTool(
+  "ws_find",
+  {
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    title: "Search workstreams",
+    description:
+      "Search every workstream's title, open and closed items, decisions and session logs, plus the inbox. Use it before adding an item (is it already tracked?), before reopening a choice (was it decided?), or to find which session or workstream touched something. All words must match one record; \"quoted phrase\" matches exactly; an ID like BG-3 or BG-D2 finds that record. Each result starts with its state: [closed item] and [superseded decision] are history, not current.",
+    inputSchema: {
+      query: z.string().min(1).describe("Words to find, e.g. availity eligibility"),
+      ws: z.string().optional().describe("Only this workstream id"),
+      kinds: z.array(z.enum(KINDS)).optional().describe("Only these record kinds"),
+      current: z.boolean().optional().describe("Leave out closed items, superseded decisions and done/archived workstreams"),
+      limit: z.number().int().min(1).max(200).optional().describe("Most results to return (default 20)"),
+    },
+  },
+  safe(async ({ query, ws, kinds, current, limit }) => {
+    const r = await search(query, { ws, kinds, current, limit: limit ?? 20 })
+    if (!r.total) return text(`No matches for ${JSON.stringify(query)}.`)
+    const more = r.total > r.results.length ? `\n… ${r.total - r.results.length} more; raise limit or narrow with ws/kinds.` : ""
+    return text(`${r.total} match${r.total === 1 ? "" : "es"} for ${JSON.stringify(query)}:\n${r.results.map(formatResult).join("\n")}${more}`)
   }),
 )
 

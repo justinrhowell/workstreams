@@ -75,7 +75,7 @@ jobs:
             '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
             | node ws/mcp/server.mjs | tee /tmp/mcp.out
-          for t in ws_list ws_show ws_compose ws_item_add ws_item_close ws_log; do
+          for t in ws_list ws_show ws_find ws_compose ws_item_add ws_item_close ws_log; do
             grep -q "\"$t\"" /tmp/mcp.out || { echo "missing tool $t"; exit 1; }
           done
 

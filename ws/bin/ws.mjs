@@ -10,6 +10,7 @@ import * as store from "../lib/store.mjs"
 import { compose, checkSources, stalePathsIn } from "../lib/compose.mjs"
 import * as capture from "../lib/capture.mjs"
 import * as summarize from "../lib/summarize.mjs"
+import { search, formatResult } from "../lib/search.mjs"
 import { runEval } from "../lib/eval.mjs"
 import { loadConfig } from "../lib/config.mjs"
 import { renderUnit, systemdService } from "../lib/board-service.mjs"
@@ -24,6 +25,8 @@ const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.ti
   ws                               pick a workstream, then \`go\`
   ws ls [--all]                    list workstreams (active + waiting; --all adds parked/done/archived)
   ws show <id>                     brief, open items, recent sessions
+  ws find <words…> [--ws ID] [--kind item,decision,log,workstream,inbox] [--current] [--limit N] [--json]
+                                   search titles, items, decisions, session logs and the inbox ("quoted phrase"; BG-3 finds that ID)
   ws prompt <id> [--tool codex] [--inline] [--no-copy]
                                    print the resume prompt and copy it to the clipboard
   ws go <id> [--codex] [--resume]  edit the prompt (fill the input slot), then launch in cwd
@@ -66,7 +69,7 @@ const { values: opt, positionals: args } = parseArgs({
     group: { type: "string" }, prefix: { type: "string" }, waiting: { type: "string" },
     session: { type: "string" }, force: { type: "boolean" }, drain: { type: "boolean" }, quiet: { type: "boolean" },
     port: { type: "string" }, install: { type: "boolean" }, uninstall: { type: "boolean" }, rebuild: { type: "boolean" }, status: { type: "boolean" }, dev: { type: "boolean" }, yes: { type: "boolean", short: "y" }, runs: { type: "string" }, case: { type: "string" }, "confirm-decision": { type: "string" }, "no-decide": { type: "boolean" }, why: { type: "string" }, rejected: { type: "string" }, evidence: { type: "string" }, supersedes: { type: "string" }, requeue: { type: "boolean" }, confirm: { type: "string" }, "no-open": { type: "boolean" }, "no-close": { type: "boolean" }, "no-add": { type: "boolean" }, "no-summary": { type: "boolean" }, days: { type: "string" }, note: { type: "string" }, text: { type: "string" },
-    closed: { type: "string" }, added: { type: "string" }, help: { type: "boolean", short: "h" },
+    closed: { type: "string" }, added: { type: "string" }, ws: { type: "string" }, kind: { type: "string" }, current: { type: "boolean" }, limit: { type: "string" }, json: { type: "boolean" }, help: { type: "boolean", short: "h" },
     "dry-run": { type: "boolean" }, "no-link": { type: "boolean" }, "no-hooks": { type: "boolean" }, "no-mcp": { type: "boolean" },
   },
 })
@@ -394,6 +397,22 @@ async function cmdTrash(sub, name) {
   die(`unknown: ws trash ${sub}`)
 }
 
+async function cmdFind(words) {
+  if (!words.length) die(`missing <words>\n\n${HELP}`)
+  if (opt.limit !== undefined && !/^[1-9]\d*$/.test(String(opt.limit))) die("--limit must be a positive number")
+  const r = await search(words.join(" "), { ws: opt.ws, kinds: opt.kind, current: opt.current, limit: Number(opt.limit || 30) })
+  reportBroken(r.broken)
+  if (opt.json) return console.log(JSON.stringify({ query: r.query, total: r.total, results: r.results }, null, 2))
+  if (!r.total) return console.log(`No matches for ${JSON.stringify(r.query)}.${opt.current ? " (--current hides closed items, superseded decisions and done/archived workstreams)" : ""}`)
+  for (const x of r.results) {
+    const [first, ...more] = formatResult(x).split("\n")
+    const closedLike = ["closed", "superseded"].includes(x.state)
+    console.log(closedLike ? dim(first) : first)
+    for (const m of more) console.log(dim(m))
+  }
+  if (r.total > r.results.length) console.log(dim(`… ${r.total - r.results.length} more (--limit ${r.total}, or narrow with --ws / --kind)`))
+}
+
 async function cmdStale() {
   const days = Number(opt.days || 7)
   const cutoff = Date.now() - days * 864e5
@@ -693,6 +712,8 @@ async function cmdHook(tool, event) {
 // Options that only mean something to one command; anything else is an error there,
 // so `ws setup --unistall` (typo) or `ws board --dry-run` doesn't silently do the default.
 const ONLY = {
+  find: ["ws", "kind", "current", "limit", "json", "help"],
+  search: ["ws", "kind", "current", "limit", "json", "help"],
   setup: ["claude", "codex", "gemini", "dry-run", "no-link", "no-hooks", "no-mcp", "uninstall", "help"],
   board: ["install", "uninstall", "rebuild", "status", "dev", "port", "no-open", "help"],
 }
@@ -717,6 +738,7 @@ try {
   else if (cmd === "setup") await cmdSetup()
   else if (cmd === "ls") await cmdLs()
   else if (cmd === "show") await cmdShow(need(rest[0], "<id>"))
+  else if (cmd === "find" || cmd === "search") await cmdFind(rest)
   else if (cmd === "prompt") await cmdPrompt(need(rest[0], "<id>"))
   else if (cmd === "go") await cmdGo(need(rest[0], "<id>"))
   else if (cmd === "new") await cmdNew(rest[0])

@@ -148,3 +148,39 @@ test("an item containing the mirror end marker can't corrupt the mirror doc", as
   assert.match(text, /Explain the &lt;!-- \/ws:open --> marker/)
   assert.match(text, /Item 2/)
 })
+
+test("success reports that mention failures still verify a close", () => {
+  const cases = [
+    ["Run the full test suite", "Ran the full test suite: Tests: 113 passed, 0 failed"],
+    ["Run the full test suite", "ran the full test suite again # pass 113 # fail 0"],
+    ["Fix the login redirect", "Fixed the login redirect and added a regression test for it"],
+    ["Fix the about nav link", "the broken about nav link now points to /about and works"],
+    ["Wire the export button", "removed the TODO and wired the export button to the API"],
+  ]
+  for (const [item, quote] of cases) {
+    const p = sum.validateProposal(JSON.stringify({ summary: "x", close: [{ id: "S-1", quote }] }), [{ id: "S-1", text: item }], `ASSISTANT: ${quote}.`)
+    assert.deepEqual(p.unverified, [], quote)
+    assert.deepEqual(p.close.map((c) => c.id), ["S-1"], quote)
+  }
+  for (const [item, quote] of [
+    ["Run the full test suite", "Ran the full test suite: 110 passed, 3 failed"],
+    ["Fix the mobile nav", "the mobile nav is still broken on small phones"],
+    ["Fix the checkout test", "the checkout test doesn't pass yet after the change"],
+  ]) {
+    const p = sum.validateProposal(JSON.stringify({ summary: "x", close: [{ id: "S-1", quote }] }), [{ id: "S-1", text: item }], `ASSISTANT: ${quote}.`)
+    assert.deepEqual(p.unverified.map((u) => u.failed), ["quote says the work isn't done"], quote)
+  }
+})
+
+test("a reminder block in a user message is dropped, the user's own words are kept", async () => {
+  const t = await write("r.jsonl", jl(
+    { type: "user", message: { content: [
+      { type: "text", text: "<system-reminder>Earlier note: we decided to use MySQL for everything</system-reminder>" },
+      { type: "text", text: "go with Postgres for the reporting database please" },
+    ] } },
+    { type: "user", message: { content: "<system-reminder>only a reminder, nothing typed</system-reminder>" } },
+  ))
+  const d = await sum.digestTranscript("claude", t)
+  assert.match(d, /USER: go with Postgres for the reporting database please/)
+  assert.doesNotMatch(d, /MySQL|only a reminder/)
+})

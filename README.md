@@ -15,7 +15,7 @@ From those it builds a fresh resume prompt whenever you start a session. Everyth
 
 ## Quick start
 
-Requires Node 20.9+ on the PATH that your agent CLIs see (hooks run `ws` through `#!/usr/bin/env node`), and at least one of Claude Code, Codex or Gemini CLI (0.26+, which added hooks).
+Requires Node 20.9+ on the PATH that your agent CLIs see (hooks run `ws` through `#!/usr/bin/env node`), and at least one of Claude Code, Codex or Gemini CLI (0.26 or later, where hooks are on by default).
 
 ```bash
 git clone https://github.com/justinrhowell/workstreams.git && cd workstreams

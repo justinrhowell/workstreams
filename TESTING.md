@@ -14,6 +14,7 @@ Notable suites:
 - `capture.test.mjs`: how ended sessions are linked, skipped or sent to the inbox.
 - `setup.test.mjs`: `ws setup` merges hooks without disturbing other settings, leaves compound hooks alone, reconciles MCP and the CLI link, uninstalls cleanly, and only ever calls the `claude`/`codex` on the env it's given (stub CLIs in tests).
 - `board-service.test.mjs`: the Linux board service: the systemd unit is rendered with correct escaping and 127.0.0.1 binding, and install/uninstall make the right `systemctl --user` calls (a fake runner; the CLI check runs on Linux only, with a stub `systemctl`).
+- `platform.test.mjs`: native Windows is refused by the CLI and MCP server while hooks still exit 0 (runs in the Windows CI job), WSL detection, and setup's WSL warnings.
 - `hardening.test.mjs`: trash containment, CRLF files, prefix and newline validation, refusing damaged files, concurrent updates, double-accept, secret redaction, config validation, provider errors, verification rules, eval failure accounting, mirror markers.
 
 ## Summarizer quality

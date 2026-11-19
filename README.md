@@ -62,12 +62,13 @@ Your data lives in `$WS_ROOT`, which defaults to `$XDG_DATA_HOME/ws` or `~/.loca
 
 ## Platforms
 
-macOS and Linux (CI runs the ws suite on both). The background board service (`ws board --install`) uses launchd on macOS and `systemctl --user` on Linux. Native Windows isn't supported (hooks and paths assume a POSIX shell); use WSL.
+macOS and Linux (CI runs the ws suite on both). The background board service (`ws board --install`) uses launchd on macOS and `systemctl --user` on Linux. On Windows, use WSL 2: see [docs/WINDOWS.md](docs/WINDOWS.md) for the exact setup. Native Windows isn't supported (hooks and paths assume a POSIX shell), and ws says so instead of half-working.
 
 ## More
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how it works, and the rules it keeps
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): settings, environment variables, manual hook setup
+- [docs/WINDOWS.md](docs/WINDOWS.md): running ws on Windows through WSL
 - [CONTRIBUTING.md](CONTRIBUTING.md): development setup and how to send changes
 - [TESTING.md](TESTING.md): the test suites
 - [SECURITY.md](SECURITY.md): reporting a vulnerability, and the security boundary

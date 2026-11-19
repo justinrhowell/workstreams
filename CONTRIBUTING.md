@@ -26,7 +26,7 @@ npm --prefix ws test   # node:test suite for the CLI, hooks, summarizer and MCP 
 npm run lint && npm run type-check && npm test && npm run build   # if you touched the board
 ```
 
-CI runs all of these on Node 20 and 22, and the ws suite on both Ubuntu and macOS.
+CI runs all of these on Node 20 and 22, the ws suite on both Ubuntu and macOS, and `ws/test/platform.test.mjs` on Windows.
 
 ## Ground rules
 
@@ -44,7 +44,7 @@ These come from the design in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Plea
 ## Good first contributions
 
 - Hook support for other agent CLIs that have session start/end hooks (`ws/lib/gemini.mjs` and `ws/test/gemini.test.mjs` show what one takes)
-- Windows testing and fixes
+- Native Windows support (PowerShell/cmd hooks, no symlink, Windows paths); today it's WSL-only, see [docs/WINDOWS.md](docs/WINDOWS.md)
 - Board accessibility and keyboard navigation
 
 ## Commits and PRs

@@ -86,7 +86,7 @@ The board is the Next app at `/`. Its API routes import `ws/lib` directly.
 
 - **macOS:** everything, including `ws board --install` (a launchd agent).
 - **Linux:** everything. `ws board --install` writes a systemd user unit to `~/.config/systemd/user/<label>.service` (honouring `XDG_CONFIG_HOME`) and enables it with `systemctl --user`; logs go to the journal (`journalctl --user -u ws.board.service`). User services stop when you log out unless you run `loginctl enable-linger`. Without `systemctl --user` (some containers, WSL without systemd), run `ws board` in a terminal. Clipboard copy uses `wl-copy`, `xclip` or `xsel`.
-- **Windows:** untested. WSL should behave like Linux.
+- **Windows:** through WSL 2, which behaves like Linux; [WINDOWS.md](WINDOWS.md) has the setup and its pitfalls (a Windows `node.exe` on PATH, files under `/mnt/c`, agent CLIs installed on the Windows side). Under WSL, ws copies with `clip.exe` and opens pages with `wslview` or `explorer.exe` when no Linux tool is set up. Native Windows is refused by every entry point; hooks exit 0. A `windows-latest` CI job checks that.
 
 ## History
 

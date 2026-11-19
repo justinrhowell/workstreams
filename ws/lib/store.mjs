@@ -112,7 +112,12 @@ export async function listWorkstreams({ broken } = {}) {
   const out = []
   for (const id of ids) {
     if (id.startsWith(".")) continue
-    if (!(await exists(path.join(WS_DIR, id, "WORKSTREAM.md")))) continue
+    // Absent WORKSTREAM.md: a stray folder, skipped quietly. Any other access error
+    // (a folder that denies traversal) is reported, so `ws doctor` and the board see it.
+    try { await fs.access(path.join(WS_DIR, id, "WORKSTREAM.md")) } catch (e) {
+      if (e.code !== "ENOENT" && e.code !== "ENOTDIR") broken?.push({ id, error: `can't read WORKSTREAM.md (${e.code})` })
+      continue
+    }
     if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
       broken?.push({ id, error: "folder name isn't a workstream id (lowercase letters, digits and dashes)" })
       continue

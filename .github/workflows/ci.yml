@@ -106,3 +106,27 @@ jobs:
       # Uses temp WS_ROOTs and a fake model endpoint; never touches real data.
       - name: Test
         run: npm test
+
+  # Native Windows isn't supported (docs/WINDOWS.md): ws refuses it cleanly, and its
+  # hooks exit 0 so a session is never broken. This job keeps that promise true.
+  windows:
+    name: Native Windows is refused cleanly (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: ws
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ws/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Platform tests
+        run: node --test test/platform.test.mjs

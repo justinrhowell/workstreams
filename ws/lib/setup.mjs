@@ -9,6 +9,7 @@ import os from "node:os"
 import { fileURLToPath } from "node:url"
 import * as store from "./store.mjs"
 import { claudeDir, codexDir, geminiDir } from "./paths.mjs"
+import { platformProblem, isWsl, onWindowsDrive } from "./platform.mjs"
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 export const BIN = path.join(PKG, "bin", "ws.mjs")
@@ -306,8 +307,23 @@ async function linkState(target) {
 
 // ---------------------------------------------------------------- setup
 
+// WSL pitfalls that make hooks fail silently later: a Windows node.exe first on PATH,
+// or ws / its data on a Windows drive (/mnt/c). Returns warnings; changes nothing.
+export function wslWarnings({ env = process.env, bin = BIN, root = store.ROOT, wsl = isWsl(env) } = {}) {
+  if (!wsl) return []
+  const out = []
+  const r = spawnSync("sh", ["-c", "command -v node"], { encoding: "utf-8", env })
+  const node = (r.stdout || "").trim()
+  if (onWindowsDrive(node) || /\.exe$/i.test(node)) out.push(`\`node\` on PATH is the Windows one (${node}). Install Node inside WSL (for example with nvm) so hooks can run ws.`)
+  if (onWindowsDrive(bin)) out.push(`ws is on a Windows drive (${bin}). Clone it inside WSL (for example under ~/) instead: /mnt/c is slow from Linux.`)
+  if (onWindowsDrive(root)) out.push(`the data folder is on a Windows drive (${root}). Keep it inside WSL: /mnt/c is slow from Linux and drops Linux file permissions.`)
+  return out
+}
+
 export async function runSetup({ tools, link = true, hooks = true, mcp = true, dryRun = false, env = process.env, log = console.log } = {}) {
+  if (platformProblem()) throw new Error(platformProblem())
   if (store.ROOT_PROBLEM) throw new Error(store.ROOT_PROBLEM)
+  for (const w of wslWarnings({ env })) log(`warning (WSL): ${w}`)
   const home = env.HOME || os.homedir()
   const root = store.ROOT
   const pin = needsPin(root, home)

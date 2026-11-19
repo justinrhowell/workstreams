@@ -14,6 +14,7 @@ import { runEval } from "../lib/eval.mjs"
 import { loadConfig } from "../lib/config.mjs"
 import { renderUnit, systemdService } from "../lib/board-service.mjs"
 import { fileURLToPath } from "node:url"
+import { platformProblem, isWsl } from "../lib/platform.mjs"
 
 const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.tildify(store.ROOT)})
 
@@ -135,9 +136,9 @@ async function cmdShow(id) {
 
 // Clipboard and browser helpers: macOS, Linux (Wayland or X11) and Windows.
 function copy(text) {
+  // Under WSL, Windows' clip.exe is the fallback when no Linux clipboard tool is set up.
   const tools = process.platform === "darwin" ? [["pbcopy"]]
-    : process.platform === "win32" ? [["clip"]]
-    : [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    : [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"], ...(isWsl() ? [["clip.exe"]] : [])]
   for (const [cmd, ...a] of tools) {
     const r = spawnSync(cmd, a, { input: text })
     if (!r.error && r.status === 0) return true
@@ -147,8 +148,13 @@ function copy(text) {
 
 function openUrl(url) {
   if (opt["no-open"]) return
-  const [cmd, ...a] = process.platform === "darwin" ? ["open"] : process.platform === "win32" ? ["cmd", "/c", "start", ""] : ["xdg-open"]
-  spawnSync(cmd, [...a, url], { stdio: "ignore" })
+  // Under WSL, open in the Windows browser (wslview from wslu, else explorer.exe).
+  const tools = process.platform === "darwin" ? [["open"]] : isWsl() ? [["wslview"], ["explorer.exe"]] : [["xdg-open"]]
+  for (const [cmd, ...a] of tools) {
+    const r = spawnSync(cmd, [...a, url], { stdio: "ignore" })
+    // explorer.exe exits 1 even when it opened the page; only a missing command moves on.
+    if (!r.error) return
+  }
 }
 
 async function cmdPrompt(id) {
@@ -693,6 +699,10 @@ const ONLY = {
 
 try {
   const [cmd, ...rest] = args
+  if (platformProblem()) {
+    if (cmd === "hook") process.exit(0) // hooks never fail a session
+    die(platformProblem())
+  }
   if (store.ROOT_PROBLEM) {
     if (cmd === "hook") process.exit(0) // hooks never fail a session
     die(store.ROOT_PROBLEM)

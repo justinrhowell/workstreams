@@ -7,6 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
 import * as store from "../lib/store.mjs"
+import { platformProblem } from "../lib/platform.mjs"
 import { compose } from "../lib/compose.mjs"
 import * as capture from "../lib/capture.mjs"
 
@@ -15,8 +16,8 @@ const fail = (e) => ({ content: [{ type: "text", text: `Error: ${e.message}` }],
 const safe = (fn) => async (args) => { try { return await fn(args) } catch (e) { return fail(e) } }
 const id = z.string().describe("Workstream id, e.g. acme-site (see ws_list)")
 
-if (store.ROOT_PROBLEM) {
-  console.error(`ws MCP server: ${store.ROOT_PROBLEM}`)
+if (platformProblem() || store.ROOT_PROBLEM) {
+  console.error(`ws MCP server: ${platformProblem() || store.ROOT_PROBLEM}`)
   process.exit(1)
 }
 

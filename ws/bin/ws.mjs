@@ -89,8 +89,15 @@ async function counts() {
   return bits.length ? dim(bits.join(" · ")) : ""
 }
 
+// Workstreams that couldn't be read are skipped everywhere; say so wherever a person looks.
+function reportBroken(broken) {
+  for (const b of broken) console.error(`✗ ${b.id}: ${b.error} (skipped; fix the file or run ws doctor)`)
+}
+
 async function cmdLs() {
-  const all = await store.listWorkstreams()
+  const broken = []
+  const all = await store.listWorkstreams({ broken })
+  reportBroken(broken)
   const shown = all.filter((w) => opt.all || ["active", "waiting"].includes(w.status))
   if (!shown.length) return console.log(`No workstreams yet. Create one: ws new <id> --title "…" --cwd <dir>`)
   for (const w of shown) {
@@ -216,6 +223,9 @@ async function cmdSet(id, pairs) {
     if (i < 1) die(`expected key=value, got "${p}"`)
     patch[p.slice(0, i)] = p.slice(i + 1)
   }
+  // Same as `ws new --cwd`: a relative folder would be resolved against each session's own
+  // folder by the hooks, so `cwd=.` would claim every session on the machine.
+  if (patch.cwd) patch.cwd = store.tildify(path.resolve(store.expand(patch.cwd)))
   await store.updateWorkstream(need(id, "<id>"), patch)
   console.log(`Updated ${id}: ${Object.keys(patch).join(", ")}`)
 }
@@ -260,13 +270,17 @@ async function cmdLog(id, rest) {
   const file = await store.appendLog(need(id, "<id>"), {
     summary: need(rest.join(" "), "summary"), tool: opt.tool, session: opt.session,
     cwd: store.tildify(process.cwd()), closed: list(opt.closed), added: list(opt.added),
+    // Run by an agent's shell tool? Then only that agent's session may adopt the note.
+    via: process.env.CLAUDECODE || Object.keys(process.env).some((k) => k.startsWith("CODEX_") && k !== "CODEX_HOME") ? "agent" : "terminal",
   })
   console.log(`Logged ${store.tildify(file)}`)
 }
 
 async function cmdDoctor(id) {
-  const all = id ? [await store.getWorkstream(id)] : await store.listWorkstreams()
-  let bad = 0
+  const broken = []
+  const all = id ? [await store.getWorkstream(id)] : await store.listWorkstreams({ broken })
+  let bad = broken.length
+  for (const b of broken) console.log(`✗ ${b.id}\n    error: ${b.error}`)
   for (const w of all) {
     const problems = await checkSources(w)
     const warnings = []

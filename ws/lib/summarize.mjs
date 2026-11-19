@@ -19,6 +19,9 @@ export const QUEUE_DIR = path.join(store.ROOT, "queue")
 export const PROPOSALS_DIR = path.join(store.ROOT, "proposals")
 const CONFIG_FILE = path.join(store.ROOT, "config.json")
 const MAX_ATTEMPTS = 5
+// Timeouts and 5xx while the endpoint is otherwise up may be the job's own fault (a digest
+// too big for a slow model). They don't use up attempts, but a job can't hit them forever.
+const MAX_TRANSIENT = 10
 const DIGEST_CHARS = 48_000 // ~12k tokens: well inside a 131k context, leaves room to think
 const HEAD_CHARS = 6_000
 
@@ -102,6 +105,7 @@ export async function requeueFailed() {
     await store.withLock(dest, async () => {
       const job = JSON.parse(await fs.readFile(f, "utf-8"))
       job.attempts = 0
+      job.transientFails = 0
       job.token = Math.random().toString(36).slice(2)
       await store.writeFileAtomic(dest, JSON.stringify(job, null, 2))
       await fs.rm(f)
@@ -140,23 +144,54 @@ const clip = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s)
 // Deterministic, before anything leaves the machine: common credential shapes in
 // prompts, assistant text and tool arguments are replaced. This is a safety net,
 // not a guarantee; see docs/CONFIGURATION.md ("Privacy").
+// A quote may arrive JSON-escaped (\" inside Codex tool arguments), so quote positions
+// accept an optional backslash and values stop at one.
+const Q = String.raw`(?:\\?["'])?`
+const VAL = String.raw`[^\s"'\\&,;|]`
 const SECRET_PATTERNS = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted key]"],
   [/\b(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,})/g, "[redacted]"],
   [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, "[redacted]"],
   [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, "[redacted]"],
   [/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted]"],
+  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}/g, "[redacted]"], // Stripe secret / restricted keys
+  [/\bAIza[0-9A-Za-z_-]{35}/g, "[redacted]"], // Google API keys
+  [/\bglpat-[A-Za-z0-9_-]{20,}/g, "[redacted]"], // GitLab
+  [/\bnpm_[A-Za-z0-9]{36}\b/g, "[redacted]"], // npm
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, "[redacted jwt]"],
   [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [redacted]"],
-  // key=value / key: value, but only when the value looks like a credential (8+ chars with
-  // both letters and digits), so prose like "token: refresh bug" survives.
-  [/((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)["']?\s*[:=]\s*["']?)(?=[^\s"'&,;]*\d)(?=[^\s"'&,;]*[A-Za-z])[^\s"'&,;]{8,}/gi, "$1[redacted]"],
+  // Shell-style NAME=value where the name says it is a credential (AWS_SECRET_ACCESS_KEY,
+  // DB_PASSWORD, GITHUB_TOKEN): redacted whatever the value looks like.
+  [new RegExp(String.raw`\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*=${Q})${VAL}{4,}`, "g"), "$1[redacted]"],
+  // key=value / key: value in any case, but only when the value looks like a credential
+  // (8+ chars with both letters and digits), so prose like "token: refresh bug" survives.
+  [new RegExp(String.raw`((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)[A-Za-z0-9_-]*${Q}\s*[:=]\s*${Q})(?=${VAL}*\d)(?=${VAL}*[A-Za-z])${VAL}{8,}`, "gi"), "$1[redacted]"],
+  // Credentials passed as command-line flags.
+  [new RegExp(String.raw`((?:^|\s)--password[= ]${Q})${VAL}+`, "g"), "$1[redacted]"],
+  [new RegExp(String.raw`((?:^|\s)(?:-u|--user)\s+${Q}[^\s:"'\\]+:)${VAL}+`, "g"), "$1[redacted]"],
+  [new RegExp(String.raw`(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]*?\s-p)${VAL}+`, "g"), "$1[redacted]"],
   [/(\/\/)[^/\s:@]+:[^/\s@]+@/g, "$1[redacted]@"],
 ]
 export function redact(text) {
   let out = String(text)
   for (const [re, sub] of SECRET_PATTERNS) out = out.replace(re, sub)
   return out
+}
+
+// Codex tool arguments are a JSON string ({"command": [...]} or {"cmd": "..."}). Decode
+// it so the digest shows the command itself, with real quotes for redaction to see.
+function codexCommand(raw) {
+  if (raw == null) return ""
+  if (typeof raw === "string") {
+    try { raw = JSON.parse(raw) } catch { return raw }
+  }
+  if (raw && typeof raw === "object") {
+    const c = raw.cmd ?? raw.command
+    if (Array.isArray(c)) return c.map(String).join(" ")
+    if (typeof c === "string") return c
+    return JSON.stringify(raw)
+  }
+  return String(raw)
 }
 
 function toolHint(name, input = {}) {
@@ -217,7 +252,7 @@ export async function digestTranscript(tool, file) {
       } else if (p.type === "item_completed" && p.item?.type === "McpToolCall") {
         lines.push(`TOOL: ${p.item.server}.${p.item.tool}`)
       } else if (p.type === "custom_tool_call" || p.type === "function_call") {
-        lines.push(`TOOL: ${toolHint(p.name, { command: String(p.input ?? p.arguments ?? "") })}`)
+        lines.push(`TOOL: ${toolHint(p.name, { command: codexCommand(p.input ?? p.arguments) })}`)
       }
     }
   }
@@ -509,12 +544,17 @@ export async function drain({ log = () => {} } = {}) {
       } catch (e) {
         failed++
         const isTransient = e.transient || e.name === "TimeoutError" || e.name === "AbortError" || /fetch failed|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(String(e.message))
+        // Stop the whole drain only for trouble every job would hit: a bad key or URL, rate
+        // limiting, or an endpoint that no longer answers. Otherwise move on to the next job,
+        // so one job that always times out can't starve the ones queued behind it.
+        const stop = isTransient && (e.config || /HTTP 429/.test(String(e.message)) || !(await endpointUp(cfg)))
         if (!isTransient) job.attempts = (job.attempts || 0) + 1
+        else if (!stop) job.transientFails = (job.transientFails || 0) + 1
         job.lastError = redact(String(e.message || e)).slice(0, 300)
         const { file, ...rest } = job
         await store.withLock(file, async () => {
           if (!(await sameJob(job))) return
-          if (job.attempts >= MAX_ATTEMPTS) {
+          if (job.attempts >= MAX_ATTEMPTS || (job.transientFails || 0) >= MAX_TRANSIENT) {
             await fs.mkdir(path.join(QUEUE_DIR, "failed"), { recursive: true })
             await store.writeFileAtomic(path.join(QUEUE_DIR, "failed", path.basename(file)), JSON.stringify(rest, null, 2))
             await fs.rm(file, { force: true })
@@ -523,7 +563,7 @@ export async function drain({ log = () => {} } = {}) {
           }
         })
         log(`${job.ws} ${store.sessionTag(job.session)}: failed (${job.lastError})`)
-        if (isTransient) break // endpoint or config trouble: stop, retry later without charging other jobs
+        if (stop) break // endpoint or config trouble: stop, retry later without charging any job
       }
     }
   } finally {

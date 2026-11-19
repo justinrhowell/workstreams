@@ -25,7 +25,7 @@ const MIN_TOOL_CALLS = 3
 const PATCH_RE = /\*\*\* (?:Update|Add|Delete) File: ([^\n"\\]+)/g
 
 export async function readTranscript(tool, transcriptPath, sessionId) {
-  const info = { title: null, started: null, ended: null, userTurns: 0, toolCalls: 0, files: new Set(), wsCalls: [], interactive: true }
+  const info = { title: null, started: null, ended: null, userTurns: 0, toolCalls: 0, files: new Set(), wsCalls: [], logCalls: [], interactive: true }
   let text = ""
   try { text = await fs.readFile(transcriptPath, "utf-8") } catch { return finish(info) }
   for (const line of text.split("\n")) {
@@ -69,6 +69,8 @@ function parseClaude(d, info) {
       if (c.type !== "tool_use") continue
       info.toolCalls++
       if (/^mcp__ws__ws_(item_|log|set_status)/.test(c.name)) info.wsCalls.push(c.name)
+      if (c.name === "mcp__ws__ws_log") info.logCalls.push(JSON.stringify(c.input || {}))
+      if (c.name === "Bash" && /\bws log\b/.test(c.input?.command || "")) info.logCalls.push(c.input.command)
       const fp = c.input?.file_path || c.input?.notebook_path
       if (fp && /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(c.name)) info.files.add(fp)
       if (c.name === "Bash" && /\bws (item|log)\b/.test(c.input?.command || "")) info.wsCalls.push(c.input.command)
@@ -84,6 +86,7 @@ function parseCodex(d, info) {
   if (p.type === "item_completed" && p.item?.type === "McpToolCall") {
     info.toolCalls++
     if (p.item.server === "ws" && /^ws_(item_|log|set_status)/.test(p.item.tool || "")) info.wsCalls.push(p.item.tool)
+    if (p.item.server === "ws" && p.item.tool === "ws_log") info.logCalls.push(JSON.stringify(p.item.arguments ?? p.item.input ?? {}))
   }
   if (p.type === "custom_tool_call" || p.type === "function_call") {
     info.toolCalls++
@@ -91,6 +94,7 @@ function parseCodex(d, info) {
     for (const m of input.matchAll(PATCH_RE)) info.files.add(m[1].trim())
     shellWrites(input, info.files)
     if (/\bws (item|log)\b/.test(input)) info.wsCalls.push(input.slice(0, 200))
+    if (/\bws log\b/.test(input)) info.logCalls.push(input.slice(0, 4000))
   }
 }
 
@@ -137,7 +141,9 @@ const under = (child, parent) => {
 // Auto-link only on WS_ID or exactly one claimant at the longest cwd prefix.
 export function matchWorkstream(list, cwd, wsId) {
   if (wsId && list.some((w) => w.id === wsId)) return { link: wsId, candidates: [wsId] }
-  const live = list.filter((w) => w.cwd && ["active", "waiting"].includes(w.status) && under(cwd, w.cwd))
+  // A relative cwd (from a hand edit or an older `ws set`) would resolve against the
+  // session's own folder and claim every session, so it never matches.
+  const live = list.filter((w) => w.cwd && path.isAbsolute(w.cwd) && ["active", "waiting"].includes(w.status) && under(cwd, w.cwd))
   if (!live.length) return { link: null, candidates: [] }
   const len = (w) => canon(w.cwd).length
   const best = Math.max(...live.map(len))
@@ -177,11 +183,24 @@ async function findSessionLog(wsId, sessionId) {
 }
 
 // A manual `ws log` written during this session (it can't know its own session id): adopt it.
-async function findAdoptableManualLog(wsId, started, ended) {
+// Several sessions can run in one workstream at once, so a session must not take notes
+// another agent session wrote:
+//   1. a note whose text appears in one of this session's own `ws log` / ws_log calls is its own;
+//   2. a note an agent wrote (via: agent) is only taken by a session that logged something;
+//   3. a note typed in a terminal (or of unknown origin) goes to whichever session ends first.
+const squash = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "")
+async function findAdoptableManualLog(wsId, started, ended, logCalls = []) {
   const ws = await store.getWorkstream(wsId)
   const t0 = new Date(started).getTime() - 60_000
   const t1 = new Date(ended).getTime() + 5 * 60_000
-  return ws.logs.find((l) => !l.session && l.source === "manual" && l.mtimeMs >= t0 && l.mtimeMs <= t1) || null
+  const open = ws.logs.filter((l) => !l.session && l.source === "manual" && l.mtimeMs >= t0 && l.mtimeMs <= t1)
+  const calls = logCalls.map(squash)
+  const mine = open.find((l) => {
+    const k = squash(String(l.summary).split("\n")[0]).slice(0, 40)
+    return k && calls.some((c) => c.includes(k))
+  })
+  if (mine) return mine
+  return open.find((l) => l.via !== "agent" || calls.length > 0) || null
 }
 
 async function writeLogFile(file, data, body) {
@@ -253,7 +272,7 @@ async function captureSessionInner({ tool, session_id, transcript_path, cwd, rea
 
 async function linkSession(link, meta, session_id, t) {
   // A `ws log` written during this run (including a resumed run) wins over refreshing an older entry.
-  const manual = meta.started && (await findAdoptableManualLog(link, meta.started, meta.ended))
+  const manual = meta.started && (await findAdoptableManualLog(link, meta.started, meta.ended, t.logCalls))
   if (manual) {
     const { data, content } = parseMd(store.normalizeEol(await fs.readFile(manual.file, "utf-8")))
     await writeLogFile(manual.file, { ...meta, ...pick(data, ["closed", "added"]), source: "manual+hook" }, content)

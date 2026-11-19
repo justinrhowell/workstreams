@@ -12,8 +12,9 @@ export type Item = { id: string; done: boolean; text: string; waiting: string | 
 const day = (v: unknown) => String(v ?? "").slice(0, 10)
 
 export async function boardData() {
+  const broken: { id: string; error: string }[] = []
   const [list, proposals, inbox, queue] = await Promise.all([
-    store.listWorkstreams(),
+    store.listWorkstreams({ broken }),
     summarize.listProposals(),
     capture.listInbox(),
     summarize.listQueue(),
@@ -40,7 +41,7 @@ export async function boardData() {
     }),
   )
   const trash = await store.listTrash()
-  return { workstreams, counts: { inbox: inbox.length, review: proposals.length, queued: queue.length, trash: trash.length }, root: store.tildify(store.ROOT), staleDays: STALE_DAYS }
+  return { workstreams, counts: { inbox: inbox.length, review: proposals.length, queued: queue.length, trash: trash.length }, root: store.tildify(store.ROOT), staleDays: STALE_DAYS, broken }
 }
 
 export type Board = Awaited<ReturnType<typeof boardData>>
@@ -107,23 +108,49 @@ export async function inboxData() {
 }
 
 // ---------------------------------------------------------------- mutations
+// Request bodies are checked here: ws/lib coerces values with String(), so a status
+// outside the columns would hide a workstream from every view, and an object for
+// waiting_on would be stored as YAML and break rendering.
+
+const BOARD_STATUSES = ["active", "waiting", "parked", "done"] // archived: use archive/unarchive
+const MAX_TEXT = 4000
+
+function text(v: unknown, what: string): string
+function text(v: unknown, what: string, optional: true): string | undefined
+function text(v: unknown, what: string, optional = false): string | undefined {
+  if (v === undefined || v === null || v === "") {
+    if (optional) return undefined
+    throw new Error(`${what} is required`)
+  }
+  if (typeof v !== "string") throw new Error(`${what} must be text`)
+  if (v.length > MAX_TEXT) throw new Error(`${what} is too long (over ${MAX_TEXT} characters)`)
+  return v
+}
 
 export async function workstreamAction(id: string, body: any) {
   switch (body?.action) {
     case "add":
-      return store.addItem(id, String(body.text || "").trim(), { waiting: body.waiting || undefined })
+      return store.addItem(id, text(body.text, "item text").trim(), { waiting: text(body.waiting, "waiting", true) })
     case "close":
-      return store.closeItem(id, String(body.item), { note: body.note || "closed on the board" })
+      return store.closeItem(id, text(body.item, "item"), { note: text(body.note, "note", true) || "closed on the board" })
     case "edit":
-      return store.editItem(id, String(body.item), { text: body.text, waiting: body.waiting })
+      return store.editItem(id, text(body.item, "item"), {
+        text: text(body.text, "item text", true),
+        // null or "" clears who the item is waiting on; leaving it out keeps it
+        waiting: body.waiting === null || body.waiting === "" ? null : text(body.waiting, "waiting", true),
+      })
     case "status": {
       const patch: Record<string, string> = {}
-      if (body.status) patch.status = body.status
-      if (body.waiting_on !== undefined) patch.waiting_on = body.waiting_on
+      if (body.status !== undefined) {
+        if (!BOARD_STATUSES.includes(body.status)) throw new Error(`status must be one of ${BOARD_STATUSES.join(", ")}`)
+        patch.status = body.status
+      }
+      if (body.waiting_on !== undefined) patch.waiting_on = body.waiting_on === null ? "" : text(body.waiting_on, "waiting on", true) ?? ""
+      if (!Object.keys(patch).length) throw new Error("nothing to change")
       return store.updateWorkstream(id, patch)
     }
     case "log":
-      return store.appendLog(id, { summary: String(body.summary || "").trim(), tool: "board" })
+      return store.appendLog(id, { summary: text(body.summary, "summary").trim(), tool: "board" })
     case "archive":
       return store.archiveWorkstream(id)
     case "unarchive":
@@ -140,7 +167,7 @@ export async function trashData() {
 }
 
 export async function trashAction(body: any) {
-  if (body?.action === "restore") return store.restoreWorkstream(String(body.name))
+  if (body?.action === "restore") return store.restoreWorkstream(text(body.name, "name"))
   throw new Error(`unknown action ${body?.action}`) // emptying the trash is CLI-only (ws trash empty --yes)
 }
 
@@ -148,7 +175,7 @@ export async function inboxAction(body: any) {
   const rows = await capture.listInbox()
   const row = rows.find((r: any) => r.session === body?.session)
   if (!row) throw new Error("inbox row not found (already handled?)")
-  if (body.action === "assign") return capture.assignInbox(row, String(body.id), body.summary || undefined)
+  if (body.action === "assign") return capture.assignInbox(row, text(body.id, "workstream"), text(body.summary, "summary", true))
   if (body.action === "ignore") return capture.ignoreInbox(row, { cwd: !!body.cwd })
   throw new Error(`unknown action ${body.action}`)
 }

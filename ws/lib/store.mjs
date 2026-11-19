@@ -103,14 +103,26 @@ export function defaultPrefix(id) {
 
 // ---------------------------------------------------------------- workstreams
 
-export async function listWorkstreams() {
+// One unreadable workstream (a hand-edit that broke the YAML, a bad `ws set`, a stray
+// folder) must not hide the others: hooks, ls, MCP and the board all list through here.
+// It is skipped, and pushed onto `broken` for callers that report problems.
+export async function listWorkstreams({ broken } = {}) {
   let ids = []
   try { ids = await fs.readdir(WS_DIR) } catch { return [] }
   const out = []
   for (const id of ids) {
     if (id.startsWith(".")) continue
     if (!(await exists(path.join(WS_DIR, id, "WORKSTREAM.md")))) continue
-    out.push(await getWorkstream(id))
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
+      broken?.push({ id, error: "folder name isn't a workstream id (lowercase letters, digits and dashes)" })
+      continue
+    }
+    try {
+      out.push(await getWorkstream(id))
+    } catch (e) {
+      // YAML errors carry a multi-line code frame; the first line says what and where.
+      broken?.push({ id, error: String(e instanceof Error ? e.message : e).split("\n")[0].replace(/:\s*$/, "") })
+    }
   }
   return out.sort((a, b) => b.lastActivity - a.lastActivity)
 }
@@ -424,6 +436,19 @@ const LOCK_STALE_MS = 30_000
 // Removing a stale lock happens inside a second, short-lived "takeover" lock, and only after
 // re-checking that the lock is still the same stale one. So two waiters can never both
 // remove locks and both proceed (one could otherwise remove the other's fresh lock).
+// A lock is also stale as soon as its owner process is gone (a hook killed by its
+// timeout, a crash): waiting out 30s would outlast every hook's own timeout and drop the
+// session. Only checked for owners on this host, since PIDs mean nothing elsewhere.
+const HOST = os.hostname()
+async function ownerGone(lock) {
+  let owner
+  try { owner = await fs.readFile(path.join(lock, "owner"), "utf-8") } catch { return false }
+  const [host, pid] = owner.split(" ")[0].split("/")
+  if (host !== HOST || !/^\d+$/.test(pid || "")) return false
+  try { process.kill(Number(pid), 0); return false } catch (e) { return e.code === "ESRCH" }
+}
+const isStale = async (lock, st) => Date.now() - st.mtimeMs > LOCK_STALE_MS || (await ownerGone(lock))
+
 async function removeIfStale(lock) {
   const gate = `${lock}.takeover`
   try { await fs.mkdir(gate) } catch (e) {
@@ -434,7 +459,7 @@ async function removeIfStale(lock) {
   }
   try {
     const st = await fs.stat(lock).catch(() => null)
-    if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) await fs.rm(lock, { recursive: true, force: true })
+    if (st && (await isStale(lock, st))) await fs.rm(lock, { recursive: true, force: true })
   } finally {
     await fs.rm(gate, { recursive: true, force: true })
   }
@@ -446,7 +471,7 @@ async function removeIfStale(lock) {
 // still ours.
 export async function withLock(file, fn) {
   const lock = file + ".lock"
-  const token = `${process.pid}-${Math.random().toString(36).slice(2)}`
+  const token = `${HOST}/${process.pid} ${Math.random().toString(36).slice(2)}`
   const start = Date.now()
   for (;;) {
     try { await fs.mkdir(lock); break } catch (e) {

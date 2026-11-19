@@ -40,7 +40,9 @@ export function findSection(text, needle) {
 // Returns { problems: string[] } describing every pointer that fails to resolve.
 export async function checkSources(ws) {
   const problems = []
-  if (ws.cwd) {
+  if (ws.cwd && !path.isAbsolute(ws.cwd)) {
+    problems.push(`cwd must be an absolute folder, not "${ws.data.cwd}": sessions won't be matched until it is fixed (ws set ${ws.id} cwd=<folder>)`)
+  } else if (ws.cwd) {
     try { await fs.access(ws.cwd) } catch { problems.push(`cwd does not exist: ${tildify(ws.cwd)}`) }
   }
   for (const s of ws.sources) {

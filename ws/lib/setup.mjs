@@ -1,4 +1,4 @@
-// `ws setup` / `ws setup --uninstall`: wire ws into Claude Code and Codex, or take it out.
+// `ws setup` / `ws setup --uninstall`: wire ws into Claude Code, Codex and Gemini CLI, or take it out.
 // Creates the data folder, links the CLI onto PATH, merges the SessionStart/SessionEnd
 // hooks into each tool's settings, and registers the MCP server. Idempotent: re-running
 // reconciles ws's own entries (hooks, MCP, CLI link) and leaves everything else alone.
@@ -8,21 +8,25 @@ import path from "node:path"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
 import * as store from "./store.mjs"
-import { claudeDir, codexDir } from "./paths.mjs"
+import { claudeDir, codexDir, geminiDir } from "./paths.mjs"
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 export const BIN = path.join(PKG, "bin", "ws.mjs")
 export const MCP = path.join(PKG, "mcp", "server.mjs")
 
-// Seconds. Codex waits on SessionEnd before exiting, so its end hook stays short;
-// heavy work (the summarizer) is always detached.
-const TIMEOUTS = { claude: { start: 10, end: 20 }, codex: { start: 10, end: 3 } }
+// Claude and Codex count seconds; Gemini counts milliseconds. Codex and Gemini wait on
+// SessionEnd before exiting, so their end hooks stay short; heavy work (the summarizer)
+// is always detached.
+const TIMEOUTS = { claude: { start: 10, end: 20 }, codex: { start: 10, end: 3 }, gemini: { start: 10_000, end: 5_000 } }
+export const TOOLS = ["claude", "codex", "gemini"]
 const EVENTS = { start: "SessionStart", end: "SessionEnd" }
 
 export const settingsFile = (tool, env = process.env) =>
-  tool === "claude" ? path.join(claudeDir(env), "settings.json") : path.join(codexDir(env), "hooks.json")
+  tool === "claude" ? path.join(claudeDir(env), "settings.json")
+    : tool === "gemini" ? path.join(geminiDir(env), "settings.json")
+      : path.join(codexDir(env), "hooks.json")
 
-// POSIX shell quoting for hook commands (Claude Code and Codex run them through sh).
+// POSIX shell quoting for hook commands (all three tools run them through sh/bash on macOS and Linux).
 const q = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${String(s).replace(/'/g, `'\\''`)}'`)
 
 const defaultRootFor = (home) => path.join(home, ".local", "share", "ws")
@@ -177,11 +181,12 @@ const runs = (cmd, args = ["--version"], env = process.env) => {
 const exists = (p) => fs.access(p).then(() => true, () => false)
 
 // Which tools to set up: explicit flags win; otherwise every tool that's installed.
-export async function detectTools({ claude, codex, env = process.env } = {}) {
-  if (claude || codex) return [claude && "claude", codex && "codex"].filter(Boolean)
+export async function detectTools({ claude, codex, gemini, env = process.env } = {}) {
+  if (claude || codex || gemini) return [claude && "claude", codex && "codex", gemini && "gemini"].filter(Boolean)
   const out = []
   if (runs("claude", undefined, env) || (await exists(claudeDir(env)))) out.push("claude")
   if (runs("codex", undefined, env) || (await exists(codexDir(env)))) out.push("codex")
+  if (runs("gemini", undefined, env) || (await exists(geminiDir(env)))) out.push("gemini")
   return out
 }
 
@@ -241,6 +246,39 @@ function restoreCommand(tool, cur) {
     ? ["claude", "mcp", "add", "--scope", "user", "ws", ...pins.flatMap((e) => ["-e", e]), "--", cur.command, cur.args]
     : ["codex", "mcp", "add", ...pins.flatMap((e) => ["--env", e]), "ws", "--", cur.command, ...(cur.argv || [cur.args])]
 }
+// Gemini CLI: the MCP server lives in the same settings.json as the hooks, so ws edits it
+// there (one read, one write, one backup) instead of going through \`gemini mcp\`.
+const geminiCur = (settings) => {
+  const s = settings?.mcpServers?.ws
+  if (!s || typeof s !== "object") return null
+  const argv = Array.isArray(s.args) ? s.args.map(String) : []
+  return { command: s.command, args: argv.join(" "), argv, env: s.env && typeof s.env === "object" ? s.env : {}, user: true }
+}
+
+// Pure: settings with mcpServers.ws added or brought up to date. A different server
+// registered as "ws" is left alone.
+export function mergeGeminiMcp(settings, { root, pin, command, check = () => true }) {
+  const out = structuredClone(settings || {})
+  const cur = geminiCur(out)
+  const want = { command, args: [MCP], ...(pin ? { env: { WS_ROOT: root } } : {}) }
+  if (cur && !isWsServer(cur)) return { settings: out, changes: [], notes: [`a different server is registered as "ws" (${cur.args}); left as is`] }
+  if (cur && cur.args === MCP && (pin ? cur.env.WS_ROOT === root : !cur.env.WS_ROOT) && check(cur.command)) return { settings: out, changes: [], notes: [] }
+  // Keep any other keys the user set on the entry (trust, timeout, …).
+  const { env: _oldEnv, ...keep } = out.mcpServers?.ws || {}
+  out.mcpServers = { ...(out.mcpServers || {}), ws: { ...keep, ...want } }
+  return { settings: out, changes: [cur ? "updated MCP server ws" : "added MCP server ws"], notes: [] }
+}
+
+export function removeGeminiMcp(settings) {
+  const out = structuredClone(settings || {})
+  const cur = geminiCur(out)
+  if (!cur) return { settings: out, changes: [], notes: [] }
+  if (!isWsServer(cur)) return { settings: out, changes: [], notes: [`"ws" points at another server (${cur.args}); left as is`] }
+  delete out.mcpServers.ws
+  if (!Object.keys(out.mcpServers).length) delete out.mcpServers
+  return { settings: out, changes: ["removed MCP server ws"], notes: [] }
+}
+
 const mcpRemoveCommand = (tool) => (tool === "claude" ? ["claude", "mcp", "remove", "--scope", "user", "ws"] : ["codex", "mcp", "remove", "ws"])
 
 function run(cmd, log, env) {
@@ -308,31 +346,36 @@ export async function runSetup({ tools, link = true, hooks = true, mcp = true, d
     }
   }
 
-  // 3. Hooks
-  if (hooks) {
-    for (const tool of tools) {
-      const file = settingsFile(tool, env)
-      try {
-        const { text, json } = await readSettings(file)
-        const { settings, changes, notes } = mergeHooks(json, tool, { wsPath, root, home })
-        for (const n of notes) log(`${tool} hooks: ${n}`)
-        if (!changes.length) { log(`${tool} hooks: up to date (${store.tildify(file)})`); continue }
-        say(`${tool} hooks: ${changes.join(", ")} in ${store.tildify(file)}`)
-        if (!dryRun) {
-          const backup = await writeSettings(file, text, settings)
-          if (backup) log(`  backup: ${store.tildify(backup)}`)
-        }
-        if (tool === "codex") log("  Codex asks you to trust new hooks once: run /hooks in Codex and approve the two ws entries.")
-      } catch (e) {
-        problems.push(`${tool} hooks: ${e.message}`)
-        log(`${tool} hooks: ${e.message}`)
+  // 3. Hooks (and, for Gemini, its MCP entry: same file, same write)
+  for (const tool of tools) {
+    const gem = tool === "gemini"
+    if (!hooks && !(gem && mcp)) continue
+    const file = settingsFile(tool, env)
+    const what = gem ? (hooks && mcp ? "hooks + MCP" : hooks ? "hooks" : "MCP") : "hooks"
+    try {
+      const { text, json } = await readSettings(file)
+      let { settings, changes, notes } = hooks ? mergeHooks(json, tool, { wsPath, root, home }) : { settings: json, changes: [], notes: [] }
+      if (gem && mcp) {
+        const m = mergeGeminiMcp(settings, { root, pin, command: nodeCommand(env), check: (c) => commandWorks(c, env) })
+        settings = m.settings; changes = [...changes, ...m.changes]; notes = [...notes, ...m.notes]
       }
+      for (const n of notes) log(`${tool} ${what}: ${n}`)
+      if (!changes.length) { log(`${tool} ${what}: up to date (${store.tildify(file)})`); continue }
+      say(`${tool} ${what}: ${changes.join(", ")} in ${store.tildify(file)}`)
+      if (!dryRun) {
+        const backup = await writeSettings(file, text, settings)
+        if (backup) log(`  backup: ${store.tildify(backup)}`)
+      }
+      if (tool === "codex") log("  Codex asks you to trust new hooks once: run /hooks in Codex and approve the two ws entries.")
+    } catch (e) {
+      problems.push(`${tool} ${what}: ${e.message}`)
+      log(`${tool} ${what}: ${e.message}`)
     }
   }
 
   // 4. MCP server: add, or replace a ws registration that points somewhere else.
   if (mcp) {
-    for (const tool of tools) {
+    for (const tool of tools.filter((t) => t !== "gemini")) {
       const add = mcpAddCommand(tool, root, pin, env)
       const shown = add.map(q).join(" ")
       if (!runs(tool, undefined, env)) { log(`${tool} MCP: \`${tool}\` not found on PATH; run later:\n  ${shown}`); continue }
@@ -366,7 +409,12 @@ export async function runUninstall({ tools, dryRun = false, env = process.env, l
     const file = settingsFile(tool, env)
     try {
       const { text, json } = await readSettings(file)
-      const { settings, changes } = removeHooks(json, tool)
+      let { settings, changes } = removeHooks(json, tool)
+      if (tool === "gemini") {
+        const m = removeGeminiMcp(settings)
+        settings = m.settings; changes = [...changes, ...m.changes]
+        for (const n of m.notes) log(`gemini MCP: ${n}`)
+      }
       if (!changes.length) log(`${tool} hooks: none to remove`)
       else {
         say(`${tool} hooks: ${changes.join(", ")} in ${store.tildify(file)}`)
@@ -377,6 +425,7 @@ export async function runUninstall({ tools, dryRun = false, env = process.env, l
       }
     } catch (e) { problems.push(`${tool} hooks: ${e.message}`); log(`${tool} hooks: ${e.message}`) }
 
+    if (tool === "gemini") continue // its MCP entry was in the settings file above
     if (!runs(tool, undefined, env)) { log(`${tool} MCP: \`${tool}\` not found; if registered, remove with: ${mcpRemoveCommand(tool).join(" ")}`); continue }
     const cur = currentMcp(tool, env)
     if (!cur) log(`${tool} MCP: not registered`)

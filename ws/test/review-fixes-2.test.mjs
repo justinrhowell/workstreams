@@ -94,13 +94,16 @@ test("a note typed in a terminal is still adopted by the session that ends", asy
 
 test("ws log records whether an agent's shell ran it", async () => {
   await store.createWorkstream("via", { title: "Via", cwd: site })
-  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "CLAUDECODE" && !k.startsWith("CODEX_")))
+  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "CLAUDECODE" && k !== "GEMINI_CLI" && !k.startsWith("CODEX_")))
   spawnSync(process.execPath, [BIN, "log", "via", "from a terminal"], { env: clean })
   spawnSync(process.execPath, [BIN, "log", "via", "from claude"], { env: { ...clean, CLAUDECODE: "1" } })
   await new Promise((r) => setTimeout(r, 1100))
   spawnSync(process.execPath, [BIN, "log", "via", "from codex"], { env: { ...clean, CODEX_SANDBOX: "seatbelt" } })
+  await new Promise((r) => setTimeout(r, 1100))
+  // Gemini CLI's shell tool sets GEMINI_CLI=1.
+  spawnSync(process.execPath, [BIN, "log", "via", "from gemini"], { env: { ...clean, GEMINI_CLI: "1" } })
   const via = Object.fromEntries((await logsOf("via")).map((l) => [l.summary, l.via]))
-  assert.deepEqual(via, { "from a terminal": "terminal", "from claude": "agent", "from codex": "agent" })
+  assert.deepEqual(via, { "from a terminal": "terminal", "from claude": "agent", "from codex": "agent", "from gemini": "agent" })
   await store.updateWorkstream("via", { status: "done" })
 })
 

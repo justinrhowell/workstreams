@@ -13,7 +13,8 @@ import matter from "gray-matter"
 const parseMd = (text) => matter(text, {})
 import * as store from "./store.mjs"
 import { loadConfig } from "./config.mjs"
-import { claudeDir, codexDir } from "./paths.mjs"
+import { claudeDir, codexDir, geminiDir } from "./paths.mjs"
+import { loadGeminiSession, partText } from "./gemini.mjs"
 
 export const QUEUE_DIR = path.join(store.ROOT, "queue")
 export const PROPOSALS_DIR = path.join(store.ROOT, "proposals")
@@ -54,6 +55,7 @@ export function llmHeaders(cfg, json = false) {
 
 // Log entries written by hand don't record a transcript path; find it by session id.
 export async function findTranscript(tool, session) {
+  if (tool === "gemini") return findGeminiTranscript(session)
   if (tool !== "codex") {
     const base = path.join(claudeDir(), "projects")
     let dirs = []
@@ -75,6 +77,28 @@ export async function findTranscript(tool, session) {
       return null
     }
     return walk(path.join(codexDir(), "sessions"), 0)
+  }
+  return null
+}
+
+// ~/.gemini/tmp/<project>/chats/session-<time>-<short id>.jsonl (or .json, older releases).
+// The file name holds only part of the id, so the first record's sessionId decides.
+async function findGeminiTranscript(session) {
+  if (!session) return null
+  const base = path.join(geminiDir(), "tmp")
+  let projects = []
+  try { projects = await fs.readdir(base) } catch { return null }
+  const short = String(session).slice(0, 8)
+  for (const p of projects) {
+    const dir = path.join(base, p, "chats")
+    let files = []
+    try { files = await fs.readdir(dir) } catch { continue }
+    // Likely matches first; the id check below is what counts.
+    files = files.filter((f) => /^session-.*\.jsonl?$/.test(f)).sort((a, b) => b.includes(short) - a.includes(short))
+    for (const f of files) {
+      const file = path.join(dir, f)
+      try { if (loadGeminiSession(await fs.readFile(file, "utf-8")).meta.sessionId === session) return file } catch {}
+    }
   }
   return null
 }
@@ -237,7 +261,20 @@ const turn = (who, text, n) => `${who}: ${clip(redact(String(text)).replace(/\s*
 export async function digestTranscript(tool, file) {
   const raw = await fs.readFile(file, "utf-8")
   const lines = []
-  for (const line of raw.split("\n")) {
+  if (tool === "gemini") {
+    for (const m of loadGeminiSession(raw).messages) {
+      if (m.type === "user") {
+        const t = partText(m.content)
+        const u = INJECTED.test(t) ? "" : userText(t)
+        if (u) lines.push(turn("USER", u, 2000))
+      } else if (m.type === "gemini") {
+        const t = partText(m.content).trim()
+        if (t) lines.push(turn("ASSISTANT", t, 1500))
+        for (const tc of Array.isArray(m.toolCalls) ? m.toolCalls : []) lines.push(`TOOL: ${toolHint(tc.name, tc.args && typeof tc.args === "object" ? tc.args : {})}`)
+      }
+    }
+  }
+  for (const line of tool === "gemini" ? [] : raw.split("\n")) {
     if (!line) continue
     let d
     try { d = JSON.parse(line) } catch { continue }

@@ -16,8 +16,8 @@ import { fileURLToPath } from "node:url"
 
 const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.tildify(store.ROOT)})
 
-  ws setup [--claude] [--codex] [--dry-run] [--no-link] [--no-hooks] [--no-mcp]
-                                   create the data folder, put ws on PATH, add hooks + MCP to Claude Code / Codex
+  ws setup [--claude] [--codex] [--gemini] [--dry-run] [--no-link] [--no-hooks] [--no-mcp]
+                                   create the data folder, put ws on PATH, add hooks + MCP to Claude Code / Codex / Gemini CLI
   ws setup --uninstall [--dry-run] remove ws's hooks, MCP entries and CLI link (your data is kept)
   ws                               pick a workstream, then \`go\`
   ws ls [--all]                    list workstreams (active + waiting; --all adds parked/done/archived)
@@ -51,7 +51,7 @@ const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.ti
   ws board --install | --uninstall install/remove the background service (starts at login; 127.0.0.1:3311)
   ws board --rebuild | --status    rebuild after updating ws, then restart; or show service state
   ws board --dev [--port N]        run a dev server in this terminal instead
-  ws hook <claude|codex> <start|end>  hook entry point (reads the hook JSON on stdin; never fails)
+  ws hook <claude|codex|gemini> <start|end>  hook entry point (reads the hook JSON on stdin; never fails)
 `
 
 const { values: opt, positionals: args } = parseArgs({
@@ -59,7 +59,7 @@ const { values: opt, positionals: args } = parseArgs({
   strict: false,
   options: {
     all: { type: "boolean" }, tool: { type: "string" }, inline: { type: "boolean" },
-    "no-copy": { type: "boolean" }, codex: { type: "boolean" }, claude: { type: "boolean" },
+    "no-copy": { type: "boolean" }, codex: { type: "boolean" }, claude: { type: "boolean" }, gemini: { type: "boolean" },
     resume: { type: "boolean" }, title: { type: "string" }, cwd: { type: "string" },
     group: { type: "string" }, prefix: { type: "string" }, waiting: { type: "string" },
     session: { type: "string" }, force: { type: "boolean" }, drain: { type: "boolean" }, quiet: { type: "boolean" },
@@ -271,7 +271,7 @@ async function cmdLog(id, rest) {
     summary: need(rest.join(" "), "summary"), tool: opt.tool, session: opt.session,
     cwd: store.tildify(process.cwd()), closed: list(opt.closed), added: list(opt.added),
     // Run by an agent's shell tool? Then only that agent's session may adopt the note.
-    via: process.env.CLAUDECODE || Object.keys(process.env).some((k) => k.startsWith("CODEX_") && k !== "CODEX_HOME") ? "agent" : "terminal",
+    via: process.env.CLAUDECODE || process.env.GEMINI_CLI === "1" || Object.keys(process.env).some((k) => k.startsWith("CODEX_") && k !== "CODEX_HOME") ? "agent" : "terminal",
   })
   console.log(`Logged ${store.tildify(file)}`)
 }
@@ -585,13 +585,13 @@ async function cmdBoard() {
 async function cmdSetup() {
   // Loaded only here, so nothing in setup can affect hooks or other commands.
   const { runSetup, runUninstall, detectTools } = await import("../lib/setup.mjs")
-  const tools = await detectTools({ claude: opt.claude, codex: opt.codex })
+  const tools = await detectTools({ claude: opt.claude, codex: opt.codex, gemini: opt.gemini })
   if (opt.uninstall) {
     const { problems } = await runUninstall({ tools, dryRun: opt["dry-run"] })
     if (problems.length) die(`\nNot everything was removed:\n  ${problems.join("\n  ")}`)
     return
   }
-  if (!tools.length && !opt["no-hooks"]) console.log("Neither Claude Code nor Codex was found; setting up the data folder and CLI only. Re-run with --claude or --codex later.")
+  if (!tools.length && !opt["no-hooks"]) console.log("No Claude Code, Codex or Gemini CLI found; setting up the data folder and CLI only. Re-run with --claude, --codex or --gemini later.")
   const { problems } = await runSetup({ tools, link: !opt["no-link"], hooks: !opt["no-hooks"], mcp: !opt["no-mcp"], dryRun: opt["dry-run"] })
   if (problems.length) die(`\nSetup finished with problems:\n  ${problems.join("\n  ")}`)
   if (!opt["dry-run"]) console.log(`\nNext: ws new <id> --title "…" --cwd <project folder>, then start a session in that folder. \`ws board\` opens the board.`)
@@ -605,7 +605,7 @@ async function cmdHook(tool, event) {
     const p = raw.trim() ? JSON.parse(raw) : {}
     const ctx = { tool, session_id: p.session_id, transcript_path: p.transcript_path, cwd: p.cwd, reason: p.reason, wsId: process.env.WS_ID }
     if (event === "start") {
-      // Structured output: Codex parses stdout that starts with "[" as JSON, and both tools accept this form.
+      // Structured output: Codex parses stdout that starts with "[" as JSON; Gemini requires JSON-only stdout. All three accept this form.
       // Retry any queued summaries while we're here (detached; never blocks startup).
       try { if (process.env.WS_NO_SPAWN !== "1" && (await summarize.listQueue()).length && (await summarize.llmConfig())) summarize.spawnDrain() } catch {}
       const note = await capture.startContext(ctx)
@@ -623,7 +623,7 @@ async function cmdHook(tool, event) {
 // Options that only mean something to one command; anything else is an error there,
 // so `ws setup --unistall` (typo) or `ws board --dry-run` doesn't silently do the default.
 const ONLY = {
-  setup: ["claude", "codex", "dry-run", "no-link", "no-hooks", "no-mcp", "uninstall", "help"],
+  setup: ["claude", "codex", "gemini", "dry-run", "no-link", "no-hooks", "no-mcp", "uninstall", "help"],
   board: ["install", "uninstall", "rebuild", "status", "dev", "port", "no-open", "help"],
 }
 
@@ -663,7 +663,7 @@ try {
   else if (cmd === "stale") await cmdStale()
   else if (cmd === "mirror") await cmdMirror(rest[0], rest[1])
   else if (cmd === "inbox") await cmdInbox(rest[0], rest[1], rest[2], rest.slice(3))
-  else if (cmd === "hook") await cmdHook(need(rest[0], "claude|codex"), need(rest[1], "start|end"))
+  else if (cmd === "hook") await cmdHook(need(rest[0], "claude|codex|gemini"), need(rest[1], "start|end"))
   else die(`unknown command "${cmd}"\n\n${HELP}`)
 } catch (e) {
   die(`ws: ${e.message}`)

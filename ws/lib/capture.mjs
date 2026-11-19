@@ -9,6 +9,7 @@ import matter from "gray-matter"
 // later reads of identical text. Passing options disables the cache.
 const parseMd = (text) => matter(text, {})
 import { codexDir } from "./paths.mjs"
+import { loadGeminiSession, partText, wsToolName } from "./gemini.mjs"
 import * as store from "./store.mjs"
 import * as summarize from "./summarize.mjs"
 
@@ -28,6 +29,7 @@ export async function readTranscript(tool, transcriptPath, sessionId) {
   const info = { title: null, started: null, ended: null, userTurns: 0, toolCalls: 0, files: new Set(), wsCalls: [], logCalls: [], interactive: true }
   let text = ""
   try { text = await fs.readFile(transcriptPath, "utf-8") } catch { return finish(info) }
+  if (tool === "gemini") { parseGemini(text, info); return finish(info) }
   for (const line of text.split("\n")) {
     if (!line) continue
     let d
@@ -97,6 +99,35 @@ function parseCodex(d, info) {
     shellWrites(input, info.files)
     if (/\bws (item|log)\b/.test(input)) info.wsCalls.push(input.slice(0, 200))
     if (/\bws log\b/.test(input)) info.logCalls.push(input.slice(0, 4000))
+  }
+}
+
+// Gemini rewrites messages in place (see gemini.mjs), so it is read as a whole session,
+// not line by line. It records no non-interactive marker: a `gemini -p` run looks like
+// an interactive one, and only the size filter keeps one-shot runs out of the inbox.
+function parseGemini(text, info) {
+  const { meta, messages } = loadGeminiSession(text)
+  if (meta.kind === "subagent") info.subagent = true
+  if (typeof meta.summary === "string" && meta.summary.trim()) info.title = meta.summary.trim()
+  info.started = meta.startTime || messages[0]?.timestamp || null
+  info.ended = meta.lastUpdated || messages.at(-1)?.timestamp || null
+  for (const m of messages) {
+    if (m.timestamp && (!info.ended || m.timestamp > info.ended)) info.ended = m.timestamp
+    if (m.type === "user" && partText(m.content).trim()) info.userTurns++
+    if (m.type !== "gemini" || !Array.isArray(m.toolCalls)) continue
+    for (const tc of m.toolCalls) {
+      info.toolCalls++
+      const args = tc.args && typeof tc.args === "object" ? tc.args : {}
+      const ws = wsToolName(tc.name)
+      if (ws && /^ws_(item_|log|set_status)/.test(ws)) info.wsCalls.push(ws)
+      if (ws === "ws_log") info.logCalls.push(JSON.stringify(args))
+      if ((tc.name === "write_file" || tc.name === "replace") && typeof args.file_path === "string") info.files.add(args.file_path)
+      if (tc.name === "run_shell_command" && typeof args.command === "string") {
+        shellWrites(args.command, info.files)
+        if (/\bws (item|log)\b/.test(args.command)) info.wsCalls.push(args.command.slice(0, 200))
+        if (/\bws log\b/.test(args.command)) info.logCalls.push(args.command.slice(0, 4000))
+      }
+    }
   }
 }
 
@@ -234,7 +265,10 @@ async function captureSessionInner({ tool, session_id, transcript_path, cwd, rea
   // The ignore list only silences sessions that no workstream claims.
   if (!link) for (const ig of await ignoredCwds()) if (under(cwd, ig)) return { action: "skip", why: `ignored cwd ${ig}` }
 
+  // Gemini leaves transcript_path empty when its recorder hasn't started; find it by id.
+  if (!transcript_path && tool === "gemini") transcript_path = await summarize.findTranscript(tool, session_id)
   const t = await readTranscript(tool, transcript_path, session_id)
+  if (t.subagent) return { action: "skip", why: "subagent" }
   // Shell commands usually write relative paths: resolve them against the session's folder.
   t.files = t.files.map((f) => (path.isAbsolute(store.expand(f)) ? f : path.join(/* turbopackIgnore: true */ cwd, f))).filter((f) => !SCRATCH.test(f))
 

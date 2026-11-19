@@ -12,6 +12,7 @@ import * as capture from "../lib/capture.mjs"
 import * as summarize from "../lib/summarize.mjs"
 import { runEval } from "../lib/eval.mjs"
 import { loadConfig } from "../lib/config.mjs"
+import { renderUnit, systemdService } from "../lib/board-service.mjs"
 import { fileURLToPath } from "node:url"
 
 const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.tildify(store.ROOT)})
@@ -466,8 +467,9 @@ async function boardUp(timeoutMs = 0) {
 }
 
 function stableNode() {
-  // The Homebrew symlink survives Node upgrades; the resolved Cellar path doesn't.
-  for (const p of ["/opt/homebrew/bin/node", "/usr/local/bin/node"]) { try { if (spawnSync(p, ["-v"]).status === 0) return p } catch {} }
+  // The Homebrew (or distro) symlink survives Node upgrades; the resolved Cellar path doesn't.
+  const candidates = process.platform === "darwin" ? ["/opt/homebrew/bin/node", "/usr/local/bin/node"] : ["/usr/local/bin/node", "/usr/bin/node"]
+  for (const p of candidates) { try { if (spawnSync(p, ["-v"]).status === 0) return p } catch {} }
   return process.execPath
 }
 
@@ -487,11 +489,79 @@ async function unloadBoard() {
 
 const xml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
+// Linux: a systemd user unit. Logs go to the journal.
+async function cmdBoardSystemd() {
+  const svc = systemdService({ label: BOARD_LABEL })
+  const installed = await svc.installed()
+  const wantsService = opt.install || opt.uninstall || opt.rebuild || opt.status
+  if (wantsService && !opt.uninstall && !svc.available()) {
+    die("`systemctl --user` isn't available here, so the background service can't be installed. Use `ws board` (a dev server in this terminal).")
+  }
+
+  if (opt.install) {
+    const node = stableNode()
+    const unit = renderUnit({
+      node, app: boardApp(), port: BOARD_PORT, root: store.ROOT, dist: BOARD_DIST,
+      pathEnv: [...new Set([path.join(os.homedir(), ".local", "bin"), path.dirname(node), "/usr/local/bin", "/usr/bin", "/bin"])].join(":"),
+    })
+    buildBoard()
+    await svc.install(unit)
+    if (!(await boardUp(20_000))) die(`Service installed but not answering yet; check ${svc.log}`)
+    console.log(`Board service running at ${BOARD_URL} (starts at login; logs: ${svc.log})`)
+    console.log(dim("To keep it running after you log out: loginctl enable-linger"))
+    openUrl(BOARD_URL)
+    return
+  }
+
+  if (opt.uninstall) {
+    if (!installed) return console.log("Board service isn't installed.")
+    await svc.uninstall()
+    return console.log("Board service removed. `ws board --dev` still runs it on demand.")
+  }
+
+  if (opt.rebuild) {
+    if (!installed) die("Board service isn't installed (ws board --install).")
+    buildBoard()
+    svc.restart()
+    if (!(await boardUp(20_000))) die(`Rebuilt, but the service isn't answering; check ${svc.log}`)
+    return console.log(`Rebuilt and restarted: ${BOARD_URL}`)
+  }
+
+  if (opt.status) {
+    const up = await boardUp()
+    const pid = installed ? svc.pid() : null
+    console.log(`service: ${installed ? `installed (${store.tildify(svc.file)})` : "not installed"}${pid ? ` (pid ${pid})` : ""}\nanswering: ${up ? `yes, ${BOARD_URL}` : "no"}\nlogs: ${svc.log}`)
+    return
+  }
+
+  if (installed && !opt.dev) {
+    if (!(await boardUp())) {
+      try { svc.start() } catch {}
+      if (!(await boardUp(15_000))) die(`The board service isn't answering; check ${svc.log} or run ws board --rebuild`)
+    }
+    console.log(BOARD_URL)
+    openUrl(BOARD_URL)
+    return
+  }
+  return devBoard()
+}
+
+// No service (or --dev): a dev server in this terminal.
+function devBoard() {
+  const port = String(opt.port || BOARD_PORT)
+  if (!opt.dev) console.log(dim("Tip: ws board --install keeps it running in the background."))
+  console.log(`Board: http://127.0.0.1:${port}  (data: ${store.tildify(store.ROOT)}; Ctrl-C to stop)`)
+  setTimeout(() => openUrl(`http://127.0.0.1:${port}`), 4000).unref?.()
+  const r = spawnSync("npx", ["next", "dev", "-H", "127.0.0.1", "-p", port], { cwd: boardApp(), stdio: "inherit", env: process.env })
+  process.exit(r.status ?? 0)
+}
+
 async function cmdBoard() {
+  if (process.platform === "linux") return cmdBoardSystemd()
   const app = boardApp()
   const installed = process.platform === "darwin" && await fs.access(BOARD_PLIST).then(() => true, () => false)
   if ((opt.install || opt.rebuild) && process.platform !== "darwin") {
-    die("The background service uses launchd, so it is macOS-only for now. Use `ws board` (a dev server in this terminal).\nA systemd user unit for Linux would be a welcome contribution: see CONTRIBUTING.md.")
+    die("The background service is available on macOS (launchd) and Linux (systemd). Use `ws board` (a dev server in this terminal).")
   }
 
   if (opt.install) {
@@ -573,13 +643,7 @@ async function cmdBoard() {
     return
   }
 
-  // No service (or --dev): a dev server in this terminal.
-  const port = String(opt.port || BOARD_PORT)
-  if (!opt.dev) console.log(dim("Tip: ws board --install keeps it running in the background."))
-  console.log(`Board: http://127.0.0.1:${port}  (data: ${store.tildify(store.ROOT)}; Ctrl-C to stop)`)
-  setTimeout(() => openUrl(`http://127.0.0.1:${port}`), 4000).unref?.()
-  const r = spawnSync("npx", ["next", "dev", "-H", "127.0.0.1", "-p", port], { cwd: app, stdio: "inherit", env: process.env })
-  process.exit(r.status ?? 0)
+  return devBoard()
 }
 
 async function cmdSetup() {

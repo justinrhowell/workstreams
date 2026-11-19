@@ -41,7 +41,7 @@ To keep the data in a synced or backed-up folder, point `WS_ROOT` there or symli
 | `llm.timeoutMs` | Per-request timeout. Default 180000. |
 | `llm.extraBody` | Extra fields merged into each chat-completions request, for server-specific options. The example turns thinking off on vLLM-served Qwen models. `null` removes a default field; `model` and `messages` can't be set. |
 | `board.port` | Port for `ws board` and the background service. Default 3311. |
-| `board.label` | launchd label for the background service (macOS). Default `ws.board`. Uninstall the service before changing it. |
+| `board.label` | Name of the background service: the launchd label on macOS, the unit name (`<label>.service`) on Linux. Default `ws.board`. Uninstall the service before changing it. |
 
 **Privacy:** for each session that ended without notes, the summarizer sends `llm.url`:
 
@@ -114,7 +114,7 @@ sources:                  # read-first docs for the resume prompt
 ## Uninstalling
 
 ```bash
-ws board --uninstall            # first, on macOS, if you installed the background service
+ws board --uninstall            # first, if you installed the background service
 ws setup --uninstall            # then this (add --dry-run to preview); it removes the ws command
 ```
 

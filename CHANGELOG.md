@@ -11,6 +11,8 @@ All notable changes to ws. Versions follow [semantic versioning](https://semver.
 - **Search**: `ws find <words>` (also `ws search`), the `ws_find` MCP tool, and a search box on the board (press `/`). It covers workstream titles, open and closed items, decisions (including their why and rejected options), session logs (summaries and files touched) and the inbox. Every word must match one record; `"quoted phrases"` match exactly; an ID like `BG-3` finds that record first and doesn't match `BG-30`. Closed items and superseded decisions are labelled and ranked after current records; `--current` leaves them out. Filters: `--ws`, `--kind`, `--limit`, `--json`. On the board, the columns narrow to workstreams with a match.
 
 ### Changed
+- **Breaking: Node 22 or newer is required.** Node 20 reached end of life in April 2026, so support for it is dropped: `engines.node` is `>=22` for both the CLI and the board, and CI tests on Node 22 and 24.
+- **CI:** every third-party action is pinned to a full commit SHA (kept current by Dependabot), workflows get a read-only token by default, and a new push to a PR cancels that PR's older runs. The separate "MCP server starts" job is gone; `ws/test/mcp.test.mjs` already covers the server in the ws suite.
 - **Windows is WSL-only, now explicitly** (#6): on native Windows every `ws` command and the MCP server stop with a message pointing to the new [docs/WINDOWS.md](docs/WINDOWS.md), and `ws hook …` exits 0 without output. Under WSL, `ws setup` warns about a Windows `node.exe` on PATH and about ws or its data on `/mnt/c`, `ws prompt` falls back to `clip.exe`, and `ws board` opens pages with `wslview` or `explorer.exe`. A `windows-latest` CI job checks the native-Windows behaviour.
 
 ## 0.1.0 — 2026-11-18

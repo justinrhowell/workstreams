@@ -6,7 +6,7 @@ Everything that is yours (workstreams, logs, settings, eval cases) lives in the 
 
 | | |
 |---|---|
-| Default | `$XDG_DATA_HOME/ws` if `XDG_DATA_HOME` is set, else `~/.local/share/ws` |
+| Default | `$XDG_DATA_HOME/ws` if `XDG_DATA_HOME` is set to an absolute path, else `~/.local/share/ws` |
 | Override | `WS_ROOT=/absolute/path` (a relative path is refused: hooks run in each project's folder, so it would mean a different folder every time) |
 
 Hooks and the MCP server don't read your shell profile. If you set `WS_ROOT`, run `ws setup` with it set, and setup will pin it into the hook commands and MCP registrations. The background board service always pins the folder it was installed with. Another option is to leave `WS_ROOT` unset and symlink `~/.local/share/ws` to the folder you want.
@@ -38,10 +38,10 @@ To keep the data in a synced or backed-up folder, point `WS_ROOT` there or symli
 | `llm.url` | Base URL of an OpenAI-compatible API (`…/v1`). Setting it turns the summarizer on. |
 | `llm.model` | Model ID. If omitted, ws uses the first model listed at `/models`. |
 | `llm.apiKeyEnv` | Name of the environment variable that holds the API key. The key itself never goes in this file. |
-| `llm.timeoutMs` | Per-request timeout. Default 180000. |
+| `llm.timeoutMs` | Per-request timeout in milliseconds, an integer from 1000 to 1800000 (30 minutes). Default 180000. |
 | `llm.extraBody` | Extra fields merged into each chat-completions request, for server-specific options. The example turns thinking off on vLLM-served Qwen models. `null` removes a default field; `model` and `messages` can't be set. |
-| `board.port` | Port for `ws board` and the background service. Default 3311. |
-| `board.label` | Name of the background service: the launchd label on macOS, the unit name (`<label>.service`) on Linux. Default `ws.board`. Uninstall the service before changing it. |
+| `board.port` | Port for `ws board` and the background service, 1 to 65535 (a number, or a string of digits). Default 3311. |
+| `board.label` | Name of the background service: the launchd label on macOS, the unit name (`<label>.service`) on Linux. Letters, digits, `.`, `_` and `-`, starting with a letter or digit. Default `ws.board`. Uninstall the service before changing it. |
 
 **Privacy:** for each session that ended without notes, the summarizer sends `llm.url`:
 
@@ -64,13 +64,15 @@ Tool output is never sent, including the output of `!` shell commands and slash 
 | `WS_LLM_MODEL` | `llm.model` | |
 | `WS_LLM_API_KEY` | the key named by `llm.apiKeyEnv` | Sent as `Authorization: Bearer …` |
 | `WS_BOARD_PORT` | `board.port` | |
-| `WS_BOARD_LABEL` | `board.label` | |
+| `WS_BOARD_LABEL` | `board.label` | Same characters as `board.label`; anything else is ignored |
 | `WS_ID` | folder matching | Set by `ws go`. Forces a session onto that workstream |
 | `WS_DEBUG` | | Hooks print what they decided to stderr |
 | `WS_NO_SPAWN` | | Hooks don't start the background summarizer (used in tests) |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Where Claude Code's settings and transcripts are; `ws setup` writes hooks there |
 | `CODEX_HOME` | `~/.codex` | Same for Codex |
 | `GEMINI_CLI_HOME` | your home folder | Gemini CLI keeps `.gemini/` (settings and transcripts) here |
+| `XDG_DATA_HOME` | `~/.local/share` | Default parent of the data folder, if absolute (see above) |
+| `XDG_CONFIG_HOME` | `~/.config` | On Linux, the board service's unit goes in `$XDG_CONFIG_HOME/systemd/user/`, if absolute |
 | `VISUAL`, `EDITOR` | | Editor for `ws go` (`VISUAL` first, then `EDITOR`, then `nano`); run through `sh`, so arguments and quoted paths work |
 
 The summarizer runs as a detached process started by the hooks, so its API key variable must be visible to the agent CLI, not just to your terminal. Gemini CLI can redact variables whose names contain `KEY`, `TOKEN` or `SECRET` from hook environments (environment-variable redaction): with that on, a hosted model's key won't reach the summarizer from a Gemini session. A self-hosted model without a key is unaffected, and `ws summarize --drain` from a terminal always works.

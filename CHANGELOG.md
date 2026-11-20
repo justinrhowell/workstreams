@@ -4,6 +4,21 @@ All notable changes to ws. Versions follow [semantic versioning](https://semver.
 
 ## Unreleased
 
+Fixes from a cross-model (Codex) end-to-end review of 0.2.1.
+
+### Fixed
+- **Review:** the board acts only on the draft it showed. It sends the draft's fingerprint with accept and reject, and ws refuses when the draft on disk is a different one (the session was summarized again); ticked boxes reset for a new draft. Publishing a draft, claiming it for an accept and rejecting it take the draft's lock, and an accept that resumes an interrupted one checks the claimed draft too. `ws review accept|reject <n>` still picks by number from a fresh listing.
+- **Review:** a draft records the text of each item it closes; if the item was reworded since, accepting leaves it open and says so. The board and `ws review` show that text next to the ID.
+- **Review:** an accept step that fails for a real reason (a file ws can't parse, a lock timeout, a full disk) stops the accept and keeps the draft for another try, instead of being counted as "skipped" and deleted. Only steps made moot meanwhile (an item already closed, removed or reworded) are skipped, and the board now shows them. Moot conflicts are flagged by ws itself, never guessed from error text.
+- **Review:** one damaged or misshapen draft file no longer breaks `ws review` or the whole board; it is reported and skipped. An empty claim left by an accept that died as it started (0.2.1 and earlier) no longer blocks accepting that draft.
+- **Summaries:** a session queued while a drain is running (or just as it finishes) is drafted by that drain, instead of waiting for the next session to end.
+- **Inbox:** assigning or ignoring a row works under that row's lock, so two at once (a double click, the board and the CLI) log the session once. An assign cut short leaves the row in the inbox, and assigning that row again finishes from the log it already wrote; a later row for the same session (resumed and ended again) is still logged in full. If notes you give on assign meet a log that already has different notes (a model summary landed first), nothing is overwritten: the row stays and the error says where to add yours. The board disables a row's buttons while it works.
+- **Workstreams:** two `ws new` of the same id at once can no longer overwrite each other. A delete writes the trash entry's details first, and an interrupted restore finishes when you run it again, never replacing a draft or queued job that is newer.
+- **`ws go`:** the prompt is written to a private temp folder (0700, file 0600) that is removed however the editor exits. A tool that can't be started is an error (exit 1) instead of a silent success.
+- **Board:** the copied `ws go` command matches the prompt tab you're on, and there is a Gemini tab. `ws board` without a service opens the page once the dev server answers (it never did before).
+- **MCP:** `ws_compose` accepts `tool: "gemini"`.
+- **Tests:** a preload (`ws/test/env.mjs`) keeps tests away from your own model endpoint (`WS_LLM_*`), tool homes and background drains. The state-correctness gate now checks the request the summarizer actually sends.
+
 ## 0.2.1 — 2026-11-20
 
 Gemini CLI support is complete: checked against a live session, and `ws go` can launch it.

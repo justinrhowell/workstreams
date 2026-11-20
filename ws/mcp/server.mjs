@@ -104,7 +104,7 @@ server.registerTool(
       "Build the full resume prompt for a workstream: files to read first, the procedure, open items and the last session. Use it to pick up a workstream from scratch, or to hand it to another agent.",
     inputSchema: {
       id,
-      tool: z.enum(["claude", "codex"]).optional().describe("Target tool; codex inlines Claude memory notes"),
+      tool: z.enum(["claude", "codex", "gemini"]).optional().describe("Target tool (default: the workstream's own); codex and gemini get Claude memory notes inlined"),
       inline: z.boolean().optional().describe("Inline every source file's content"),
     },
   },

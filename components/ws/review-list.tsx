@@ -51,7 +51,8 @@ export function ReviewList({ version, onChange, onOpen }: { version: number; onC
       {failed}
       <div className="max-w-3xl space-y-3">
         {rows.map((p) => (
-          <div key={p.ws + p.session}>
+          // Keyed by the draft's fingerprint too: a newer draft for the session starts with nothing ticked.
+          <div key={p.ws + p.session + p.fingerprint}>
             <button className="mb-1 text-sm font-medium underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" onClick={() => onOpen(p.ws)}>{p.ws}</button>
             <ProposalCard p={p} onDone={() => { load(); onChange() }} />
           </div>
@@ -72,8 +73,10 @@ export function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void })
   async function act(action: "accept" | "reject") {
     setBusy(true)
     try {
-      await api.reviewAct({ action, ws: p.ws, session: p.session, close, add, unverified: confirm, decide, confirmDecisions: confirmDec })
-      toast.success(action === "accept" ? "Applied" : "Rejected")
+      const r = await api.reviewAct({ action, ws: p.ws, session: p.session, fingerprint: p.fingerprint, close, add, unverified: confirm, decide, confirmDecisions: confirmDec }) as { skipped?: string[] }
+      if (action === "reject") toast.success("Rejected")
+      else if (r?.skipped?.length) toast.warning(`Applied; skipped: ${r.skipped.join("; ")}`)
+      else toast.success("Applied")
       onDone()
     } catch (e) {
       toast.error(errorText(e))
@@ -92,8 +95,8 @@ export function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void })
         <label className="mt-2 flex items-start gap-2">
           <Checkbox checked={close} onCheckedChange={(v) => setClose(v === true)} className="mt-0.5" />
           <span>
-            Close {p.close.map((c: { id: string; evidence: string }) => (
-              <span key={c.id} className="block text-xs"><span className="font-mono">{c.id}</span> <span className="text-muted-foreground">{c.evidence}</span></span>
+            Close {p.close.map((c) => (
+              <span key={c.id} className="block text-xs"><span className="font-mono">{c.id}</span> {c.item ? <>{c.item} · </> : null}<span className="text-muted-foreground">{c.evidence}</span></span>
             ))}
           </span>
         </label>
@@ -116,7 +119,7 @@ export function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void })
             className="mt-0.5"
           />
           <span className="text-xs">
-            Also close <span className="font-mono">{u.id}</span>? <span className="text-muted-foreground">Unverified ({u.failed}): {u.evidence}</span>
+            Also close <span className="font-mono">{u.id}</span>{u.item ? ` (${u.item})` : ""}? <span className="text-muted-foreground">Unverified ({u.failed}): {u.evidence}</span>
           </span>
         </label>
       ))}

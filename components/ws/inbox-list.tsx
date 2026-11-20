@@ -61,8 +61,14 @@ export function InboxList({ workstreams, version, onChange }: { workstreams: Wor
   )
 }
 
-function Row({ r, live, act }: { r: InboxRow; live: Workstream[]; act: (b: Record<string, unknown>, done: string) => void }) {
+function Row({ r, live, act }: { r: InboxRow; live: Workstream[]; act: (b: Record<string, unknown>, done: string) => Promise<void> }) {
   const [target, setTarget] = useState(r.suggestions[0] || "")
+  // One action per row at a time: a second click while the first is in flight would only fail.
+  const [busy, setBusy] = useState(false)
+  async function run(b: Record<string, unknown>, done: string) {
+    setBusy(true)
+    try { await act(b, done) } finally { setBusy(false) }
+  }
   return (
     <li className="flex flex-wrap items-center gap-3 p-3 text-sm">
       <div className="min-w-0 flex-1">
@@ -79,9 +85,9 @@ function Row({ r, live, act }: { r: InboxRow; live: Workstream[]; act: (b: Recor
           ))}
         </SelectContent>
       </Select>
-      <Button size="sm" disabled={!target} aria-label={`Assign ${r.title || "untitled session"}`} onClick={() => act({ action: "assign", session: r.session, id: target }, `Linked to ${target}`)}>Assign</Button>
-      <Button size="sm" variant="ghost" aria-label={`Ignore ${r.title || "untitled session"}`} onClick={() => act({ action: "ignore", session: r.session }, "Ignored")}>Ignore</Button>
-      <Button size="sm" variant="ghost" aria-label={`Ignore every future session in ${r.cwd}`} title={`Ignore every future session in ${r.cwd}`} onClick={() => act({ action: "ignore", session: r.session, cwd: true }, `Ignoring ${r.cwd}`)}>
+      <Button size="sm" disabled={!target || busy} aria-label={`Assign ${r.title || "untitled session"}`} onClick={() => run({ action: "assign", session: r.session, id: target }, `Linked to ${target}`)}>Assign</Button>
+      <Button size="sm" variant="ghost" disabled={busy} aria-label={`Ignore ${r.title || "untitled session"}`} onClick={() => run({ action: "ignore", session: r.session }, "Ignored")}>Ignore</Button>
+      <Button size="sm" variant="ghost" disabled={busy} aria-label={`Ignore every future session in ${r.cwd}`} title={`Ignore every future session in ${r.cwd}`} onClick={() => run({ action: "ignore", session: r.session, cwd: true }, `Ignoring ${r.cwd}`)}>
         Ignore folder
       </Button>
     </li>

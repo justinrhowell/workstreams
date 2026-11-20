@@ -1,7 +1,7 @@
 // Workstream store: markdown files on disk.
 // Layout (see docs/ARCHITECTURE.md):  $WS_ROOT/ws/<id>/{WORKSTREAM.md, open.md, log/*.md}
 //                        $WS_ROOT/procedures/<name>.md
-import { promises as fs } from "node:fs"
+import { promises as fs, constants as fsConstants } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import matter from "gray-matter"
@@ -187,6 +187,13 @@ export async function createWorkstream(id, fields) {
     if (!PREFIX_RE.test(fields.prefix)) throw new Error("prefix must be letters and digits, starting with a letter (e.g. AB)")
   }
   for (const k of ["title", "waiting_on", "group"]) if (fields?.[k] !== undefined) fields = { ...fields, [k]: oneLine(fields[k]) }
+  // The folder itself is the reservation: of two creators, only one mkdir succeeds, so the
+  // loser can't overwrite the winner's WORKSTREAM.md or reset its open items.
+  await fs.mkdir(WS_DIR, { recursive: true })
+  try { await fs.mkdir(dir) } catch (e) {
+    if (e.code === "EEXIST") throw new Error(`${id} already exists`)
+    throw e
+  }
   await fs.mkdir(path.join(dir, "log"), { recursive: true })
   const data = { id, status: "active", tool: "claude", created: new Date().toISOString(), sources: [], ...fields }
   for (const k of Object.keys(data)) if (data[k] === undefined) delete data[k]
@@ -252,6 +259,9 @@ export async function deleteWorkstream(id) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-")
   const dest = path.join(TRASH_DIR, `${id}__${stamp}`)
   await fs.mkdir(dest, { recursive: true })
+  // The entry's metadata lands before anything moves, so a delete interrupted at any later
+  // step still leaves a trash entry that `ws trash restore` can bring back.
+  await writeFileAtomic(path.join(dest, "TRASHED.json"), JSON.stringify({ id, title: ws.title, deleted_at: new Date().toISOString() }, null, 2))
   await fs.rename(ws.dir, path.join(dest, "ws"))
   // Pending drafts and queued summaries go with it, so nothing resurfaces.
   const props = path.join(ROOT, "proposals", id)
@@ -274,7 +284,6 @@ export async function deleteWorkstream(id) {
       } catch {}
     }
   }
-  await writeFileAtomic(path.join(dest, "TRASHED.json"), JSON.stringify({ id, title: ws.title, deleted_at: new Date().toISOString() }, null, 2))
   return { trash: path.basename(dest) }
 }
 
@@ -303,24 +312,50 @@ async function trashEntry(name) {
   return full
 }
 
+// Move a file only if nothing is at the destination, checked atomically: a hard link fails
+// rather than replace (exclusive copy where hard links aren't supported). Returns false
+// when the destination already existed (the source is left for the caller to drop).
+async function moveNoReplace(from, to) {
+  try { await fs.link(from, to) } catch (e) {
+    if (e.code === "EEXIST") return false
+    if (!["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes(e.code)) throw e
+    try { await fs.copyFile(from, to, fsConstants.COPYFILE_EXCL) } catch (e2) {
+      if (e2.code === "EEXIST") return false
+      throw e2
+    }
+  }
+  await fs.rm(from, { force: true })
+  return true
+}
+
+// Every step can be repeated: if a restore is interrupted after the workstream folder moved,
+// restoring the same entry again moves the drafts and queued jobs that were left behind.
 export async function restoreWorkstream(name) {
   const src = await trashEntry(name)
-  if (!(await exists(path.join(src, "ws")))) throw new Error(`Nothing to restore at ${tildify(src)}`)
-  const { id } = JSON.parse(await fs.readFile(path.join(src, "TRASHED.json"), "utf-8"))
-  if (await exists(path.join(WS_DIR, id))) throw new Error(`A workstream "${id}" already exists; rename or delete it first`)
-  await fs.mkdir(WS_DIR, { recursive: true })
-  await fs.rename(path.join(src, "ws"), path.join(WS_DIR, id))
-  if (await exists(path.join(src, "proposals"))) {
-    await fs.mkdir(path.join(ROOT, "proposals"), { recursive: true })
-    await fs.rename(path.join(src, "proposals"), path.join(ROOT, "proposals", id))
+  // The id is in TRASHED.json; the entry name (<id>__<time>) is the fallback for an entry
+  // whose metadata is missing or damaged.
+  let id = null
+  try { id = JSON.parse(await fs.readFile(path.join(src, "TRASHED.json"), "utf-8")).id } catch {}
+  if (!isId(id)) id = String(name).split("__")[0]
+  if (!isId(id)) throw new Error(`Can't tell which workstream ${tildify(src)} holds`)
+  const leftovers = []
+  for (const part of ["proposals", "queue", "queue-failed"]) if (await exists(path.join(src, part))) leftovers.push(part)
+  if (await exists(path.join(src, "ws"))) {
+    if (await exists(path.join(WS_DIR, id))) throw new Error(`A workstream "${id}" already exists; rename or delete it first`)
+    await fs.mkdir(WS_DIR, { recursive: true })
+    await fs.rename(path.join(src, "ws"), path.join(WS_DIR, id))
+  } else if (!leftovers.length || !(await exists(path.join(WS_DIR, id)))) {
+    throw new Error(`Nothing to restore at ${tildify(src)}`)
   }
-  for (const [from, to] of [["queue", "queue"], ["queue-failed", path.join("queue", "failed")]]) {
-    if (!(await exists(path.join(src, from)))) continue
+  // Moved file by file, and never over an existing file: a draft or job already there (a
+  // finished part of an earlier attempt, a job re-queued or a draft published since, which
+  // is newer) is kept, even one that lands while this runs. Leftover lock folders are dropped.
+  for (const [from, to] of [["proposals", path.join("proposals", id)], ["queue", "queue"], ["queue-failed", path.join("queue", "failed")]]) {
+    if (!leftovers.includes(from)) continue
     await fs.mkdir(path.join(/* turbopackIgnore: true */ ROOT, to), { recursive: true })
-    for (const f of await fs.readdir(path.join(src, from))) {
-      // A job re-queued since the delete is newer: keep it, drop the trashed copy.
-      if (await exists(path.join(/* turbopackIgnore: true */ ROOT, to, f))) continue
-      await fs.rename(path.join(src, from, f), path.join(/* turbopackIgnore: true */ ROOT, to, f))
+    for (const ent of await fs.readdir(path.join(src, from), { withFileTypes: true })) {
+      if (!ent.isFile()) continue
+      await moveNoReplace(path.join(src, from, ent.name), path.join(/* turbopackIgnore: true */ ROOT, to, ent.name))
     }
   }
   await fs.rm(src, { recursive: true, force: true })
@@ -595,22 +630,37 @@ export function addItem(id, text, { waiting } = {}) {
   })
 }
 
+// A request that conflicts with the current records (an item that's gone, already closed,
+// or reworded since a draft quoted it; a decision with no text), as opposed to ws failing
+// (a file it can't parse, a lock timeout, a full disk). Code that replays a draft tells
+// the two apart by this flag, never by the message, which can quote user text.
+export function conflict(msg) {
+  const e = new Error(msg)
+  e.conflict = true
+  return e
+}
+
 export async function closeItem(id, itemId, opts = {}) {
   return (await closeItems(id, [itemId], opts))[0]
 }
 
 // All or nothing: every ID is checked before any is closed, in one write, so a bad ID in
 // a list never leaves the others half-closed behind an error.
-export function closeItems(id, itemIds, { session, note } = {}) {
+// `expect` maps an ID to the item text the caller saw (a model draft quotes it): an item
+// reworded since then is left open, since the evidence was about the old wording.
+export function closeItems(id, itemIds, { session, note, expect = {} } = {}) {
   return mutateOpen(id, (state) => {
     const items = [], problems = []
+    const expected = new Map(Object.entries(expect || {}).map(([k, v]) => [k.toUpperCase(), v]))
     for (const itemId of itemIds) {
       const item = state.items.find((i) => i.id.toUpperCase() === String(itemId).toUpperCase())
+      const was = expected.get(String(itemId).toUpperCase())
       if (!item) problems.push(`${itemId} not found in ${id}`)
       else if (item.done) problems.push(`${itemId} is already closed`)
+      else if (typeof was === "string" && oneLine(was) !== oneLine(item.text)) problems.push(`${item.id} was reworded since the draft (now "${item.text}"), so it was left open`)
       else if (!items.includes(item)) items.push(item)
     }
-    if (problems.length) throw new Error(problems.join("; ") + (itemIds.length > 1 ? " (nothing was closed)" : ""))
+    if (problems.length) throw conflict(problems.join("; ") + (itemIds.length > 1 ? " (nothing was closed)" : ""))
     // Keep open.md readable: the full evidence lives in the session log, not in this line.
     const n = note && oneLine(note).replace(/[()]/g, "")
     const closed = [today(), session && oneLine(session).slice(0, 8), n && (n.length > 160 ? n.slice(0, 159) + "…" : n)].filter(Boolean).join(", ")
@@ -706,13 +756,13 @@ export async function decide(id, text, { why, rejected, evidence, session, super
     let old = null
     if (supersedes) {
       old = state.decisions.find((d) => d.id.toUpperCase() === String(supersedes).toUpperCase())
-      if (!old) throw new Error(`${supersedes} not found in ${id}`)
-      if (!old.active) throw new Error(`${supersedes} is already superseded`)
+      if (!old) throw conflict(`${supersedes} not found in ${id}`)
+      if (!old.active) throw conflict(`${supersedes} is already superseded`)
     }
     const opt = (v) => (v ? oneLine(v) || undefined : undefined)
     const d = { id: `${ws.prefix}-D${state.next}`, text: oneLine(text), date: today(), active: true, superseded_by: null,
       why: opt(why), rejected: opt(Array.isArray(rejected) ? rejected.join("; ") : rejected), evidence: opt(evidence), session: opt(session) }
-    if (!d.text) throw new Error("decision text is empty")
+    if (!d.text) throw conflict("decision text is empty")
     state.next += 1
     state.decisions.push(d)
     if (old) { old.active = false; old.superseded_by = d.id }

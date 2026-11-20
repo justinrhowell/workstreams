@@ -324,7 +324,10 @@ test("R2 F23: an accept that fails partway can be finished without applying anyt
   const { data, content } = matter(await fs.readFile(again.file, "utf-8"))
   data.add[1].text = "Second"
   await fs.writeFile(again.file, matter.stringify(content, data))
-  await sum.acceptProposal(again)
+  // A listing from before the edit no longer matches the claim; a fresh one (what `ws review` shows) does.
+  await assert.rejects(sum.acceptProposal(again), /changed since you opened it/)
+  const [fixed] = await sum.listProposals("r2-accept")
+  await sum.acceptProposal(fixed)
   const items = (await store.readOpen("r2-accept")).items.map((i) => i.text)
   assert.deepEqual(items, ["First", "Second"])
   assert.equal((await store.readDecisions("r2-accept")).decisions.length, 1)

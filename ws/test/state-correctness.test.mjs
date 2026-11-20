@@ -4,6 +4,7 @@
 import { test, before, after } from "node:test"
 import assert from "node:assert/strict"
 import { promises as fs } from "node:fs"
+import http from "node:http"
 import path from "node:path"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
@@ -82,11 +83,30 @@ test("MCP ws_show and ws_compose", async () => {
 })
 
 test("summarizer input and validation", async () => {
-  const open = (await store.readOpen("st")).items.filter((i) => !i.done)
-  const decided = (await store.readDecisions("st")).decisions.filter((d) => d.active)
-  clean("summarizer open-items input", open.map((i) => i.text).join("\n") + "\nLive item stays")
-  assert.ok(!decided.some((d) => d.text.includes(DEAD_DEC)), "summarizer decided-input leaked a superseded decision")
+  // What processJob really sends to the model, captured at a fake endpoint.
+  let sent = null
+  const server = http.createServer((req, res) => {
+    let body = ""
+    req.on("data", (c) => (body += c))
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json")
+      if (req.url.endsWith("/models")) return res.end(JSON.stringify({ data: [{ id: "m" }] }))
+      sent = JSON.parse(body).messages.map((m) => m.content).join("\n")
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ summary: "x", close: [], add: [] }) }, finish_reason: "stop" }] }))
+    })
+  })
+  await new Promise((r) => server.listen(0, "127.0.0.1", r))
+  try {
+    const t = path.join(tmp, "t.jsonl")
+    await fs.writeFile(t, JSON.stringify({ type: "user", timestamp: "2099-01-01T10:00:00Z", message: { content: "work on the live item " + "x".repeat(250) } }) + "\n")
+    const cfg = { url: `http://127.0.0.1:${server.address().port}/v1`, model: "m", timeoutMs: 10_000, apiKey: null, extraBody: {} }
+    await sum.processJob({ ws: "st", session: "state-sess", tool: "claude", transcript: t }, cfg)
+  } finally { server.close() }
+  assert.ok(sent, "the model was called")
+  clean("summarizer input", sent)
+  assert.match(sent, /Live decision stays/)
   // A proposal can't re-close an already closed item.
+  const open = (await store.readOpen("st")).items.filter((i) => !i.done)
   const p = sum.validateProposal(JSON.stringify({ summary: "x", close: [{ id: closedId, quote: "q q q q q", why: "w" }] }), open, "q q q q q")
   assert.equal(p.close.length + p.unverified.length, 0)
 })

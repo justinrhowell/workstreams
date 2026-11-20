@@ -8,7 +8,7 @@
     "ws": "bin/ws.mjs"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --import ./test/env.mjs --test test/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

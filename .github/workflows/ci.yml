@@ -106,4 +106,4 @@ jobs:
         run: npm ci
 
       - name: Platform tests
-        run: node --test test/platform.test.mjs
+        run: node --import ./test/env.mjs --test test/platform.test.mjs

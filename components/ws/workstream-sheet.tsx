@@ -22,7 +22,8 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
   const [newItem, setNewItem] = useState("")
   const [newWaiting, setNewWaiting] = useState("")
   const [waitingOn, setWaitingOn] = useState("")
-  const [tool, setTool] = useState<"claude" | "codex">("claude")
+  // null: the workstream's own tool (what plain `ws go <id>` launches).
+  const [picked, setTool] = useState<"claude" | "codex" | "gemini" | null>(null)
   const [busy, setBusy] = useState(false)
   // A failed detail read (e.g. the workstream was deleted from the CLI) is shown in the panel
   // with Retry, instead of a toast and a "Loading…" that never ends.
@@ -45,7 +46,7 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
 
   // New workstream: clear the old detail and error, then fetch (after mount, outside the effect body).
   useEffect(() => {
-    const t = setTimeout(() => { setD(null); setLoadError(null); load() }, 0)
+    const t = setTimeout(() => { setD(null); setLoadError(null); setTool(null); load() }, 0)
     return () => clearTimeout(t)
   }, [load])
 
@@ -77,7 +78,10 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
     navigator.clipboard.writeText(text).then(() => toast.success(`${what} copied`), () => onError("Clipboard blocked"))
   }
 
+  const tool = picked ?? d?.tool ?? "claude"
   const prompt = d?.prompt[tool]
+  // A flag only when the tab isn't the workstream's own tool, so the command launches the prompt shown.
+  const goCommand = d ? `ws go ${d.id}${tool !== d.tool ? ` --${tool}` : ""}` : ""
 
   return (
     <Sheet open={!!id} onOpenChange={(o) => !o && onClose()}>
@@ -135,7 +139,7 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
               <section>
                 <h3 className="mb-2 text-sm font-medium">To review</h3>
                 <div className="space-y-2">
-                  {d.proposals.map((p) => <ProposalCard key={p.session} p={p} onDone={() => { load(); onChange() }} />)}
+                  {d.proposals.map((p) => <ProposalCard key={p.session + p.fingerprint} p={p} onDone={() => { load(); onChange() }} />)}
                 </div>
               </section>
             )}
@@ -193,7 +197,7 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h3 className="text-sm font-medium">Resume prompt</h3>
                 <div className="flex gap-1">
-                  {(["claude", "codex"] as const).map((t) => (
+                  {(["claude", "codex", "gemini"] as const).map((t) => (
                     <Button key={t} size="sm" variant={tool === t ? "secondary" : "ghost"} aria-pressed={tool === t} aria-label={`Resume prompt for ${t}`} onClick={() => setTool(t)}>{t}</Button>
                   ))}
                 </div>
@@ -205,8 +209,8 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
                   <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md border bg-muted/40 p-3 text-xs">{prompt?.text}</pre>
                   <div className="mt-2 flex flex-wrap gap-2">
                     <Button size="sm" onClick={() => copy(prompt?.text || "", "Prompt")}>Copy prompt</Button>
-                    <Button size="sm" variant="outline" onClick={() => copy(`ws go ${d.id}${tool === "codex" ? " --codex" : ""}`, "Command")}>
-                      Copy <code className="ml-1">ws go {d.id}{tool === "codex" ? " --codex" : ""}</code>
+                    <Button size="sm" variant="outline" onClick={() => copy(goCommand, "Command")}>
+                      Copy <code className="ml-1">{goCommand}</code>
                     </Button>
                   </div>
                 </>

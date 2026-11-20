@@ -16,7 +16,7 @@ export async function boardData() {
   const broken: { id: string; error: string }[] = []
   const [list, proposals, inbox, queue] = await Promise.all([
     store.listWorkstreams({ broken }),
-    summarize.listProposals(),
+    summarize.listProposals(undefined, { broken }),
     capture.listInbox({ broken }),
     summarize.listQueue(),
   ])
@@ -61,7 +61,7 @@ export async function detailData(id: string) {
   const decisions = ((await store.readDecisions(id)).decisions as any[]).filter((d) => d.active).map((d) => ({
     id: d.id as string, text: d.text as string, why: (d.why || "") as string, rejected: (d.rejected || "") as string, date: (d.date || "") as string,
   }))
-  const [claude, codex, proposals] = await Promise.all([tryCompose(id, "claude"), tryCompose(id, "codex"), summarize.listProposals(id)])
+  const [claude, codex, gemini, proposals] = await Promise.all([tryCompose(id, "claude"), tryCompose(id, "codex"), tryCompose(id, "gemini"), summarize.listProposals(id)])
   return {
     id,
     title: w.title as string,
@@ -69,6 +69,8 @@ export async function detailData(id: string) {
     status: w.status as string,
     waiting_on: (w.waiting_on as string) || "",
     cwd: w.cwd ? store.tildify(w.cwd) : "",
+    // The tool `ws go <id>` launches without a flag.
+    tool: (["claude", "codex", "gemini"].includes(w.tool) ? w.tool : "claude") as "claude" | "codex" | "gemini",
     brief: w.brief as string,
     procedure: (w.procedure as string) || null,
     mirror: w.data.mirror ? String(w.data.mirror) : null,
@@ -81,7 +83,7 @@ export async function detailData(id: string) {
       session: (l.session || "") as string, closed: (l.closed || []) as string[], added: (l.added || []) as string[], files: (l.files_touched || []).length as number,
     })),
     proposals: proposals.map(proposalView),
-    prompt: { claude, codex },
+    prompt: { claude, codex, gemini },
     lastActivity: w.lastActivity as number,
   }
 }
@@ -91,9 +93,12 @@ export type Detail = Awaited<ReturnType<typeof detailData>>
 function proposalView(p: any) {
   return {
     ws: p.ws as string, session: p.session as string, tool: p.tool as string, created: day(p.created), model: p.model as string, summary: p.summary as string,
-    close: (p.close || []) as { id: string; evidence: string }[], add: (p.add || []) as { text: string; waiting: string | null }[],
-    unverified: (p.unverified || []) as { id: string; evidence: string; failed: string }[],
+    // `item`: the item's text when the draft was made (older drafts don't have it).
+    close: (p.close || []) as { id: string; item?: string; evidence: string }[], add: (p.add || []) as { text: string; waiting: string | null }[],
+    unverified: (p.unverified || []) as { id: string; item?: string; evidence: string; failed: string }[],
     decide: (p.decide || []) as { text: string; why: string | null; rejected: string[]; quote: string; unverified?: string }[],
+    // Sent back with accept/reject: the server refuses if the draft on disk is no longer this one.
+    fingerprint: summarize.proposalFingerprint(p) as string,
   }
 }
 
@@ -202,13 +207,19 @@ export async function inboxAction(body: any) {
 export async function reviewAction(body: any) {
   text(body?.ws, "workstream")
   text(body?.session, "session")
-  const p = (await summarize.listProposals(body?.ws)).find((x: any) => x.session === body?.session)
-  if (!p) throw new Error("proposal not found (already handled?)")
+  const fingerprint = text(body?.fingerprint, "fingerprint")
+  // The draft for a session is replaced when the session is summarized again, and an
+  // interrupted accept can sit beside a newer draft for the same session: act only on the
+  // one the reviewer was shown.
+  const forSession = (await summarize.listProposals(body?.ws)).filter((x: any) => x.session === body?.session)
+  if (!forSession.length) throw new Error("proposal not found (already handled?)")
+  const p = forSession.find((x: any) => summarize.proposalFingerprint(x) === fingerprint)
+  if (!p) throw new Error("This draft changed since the board showed it; review the new one")
   if (body.action === "accept") {
     const unverified = Array.isArray(body.unverified) ? body.unverified.map(String) : []
     const confirmDecisions = Array.isArray(body.confirmDecisions) ? body.confirmDecisions.map(Number) : []
     return summarize.acceptProposal(p, { close: body.close !== false, add: body.add !== false, summary: body.summary !== false, unverified, decide: body.decide !== false, confirmDecisions })
   }
-  if (body.action === "reject") return summarize.rejectProposal(p)
+  if (body.action === "reject") return summarize.rejectProposal(p, { fingerprint: body.fingerprint })
   throw new Error(`unknown action ${body.action}`)
 }

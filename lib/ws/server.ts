@@ -17,7 +17,7 @@ export async function boardData() {
   const [list, proposals, inbox, queue] = await Promise.all([
     store.listWorkstreams({ broken }),
     summarize.listProposals(),
-    capture.listInbox(),
+    capture.listInbox({ broken }),
     summarize.listQueue(),
   ])
   const workstreams = await Promise.all(

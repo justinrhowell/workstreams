@@ -19,7 +19,11 @@ export async function loadCases(only) {
   try { files = (await fs.readdir(dir)).filter((f) => f.endsWith(".json")).sort() } catch { return [] }
   const cases = []
   for (const f of files) {
-    const c = JSON.parse(await fs.readFile(path.join(dir, f), "utf-8"))
+    let c
+    try {
+      c = JSON.parse(await fs.readFile(path.join(dir, f), "utf-8"))
+      if (!c || typeof c !== "object" || typeof c.transcript !== "string") throw new Error("needs a \"transcript\" path")
+    } catch (e) { throw new Error(`eval case ${f}: ${e.message}`) }
     c.name ||= f.replace(/\.json$/, "")
     if (only && !c.name.includes(only)) continue
     c.transcriptPath = path.isAbsolute(store.expand(c.transcript)) ? store.expand(c.transcript) : path.join(store.ROOT, c.transcript)

@@ -234,8 +234,9 @@ const commandWorks = (cmd, env) => cmd === "node"
 const mcpMatches = (cur, root, pin, env) => cur && cur.args === MCP && (pin ? cur.env.WS_ROOT === root : !cur.env.WS_ROOT) && commandWorks(cur.command, env)
 const isWsServer = (cur) => cur && /(^|\/)ws\/mcp\/server\.mjs$/.test(cur.args)
 
-function mcpAddCommand(tool, root, pin, env) {
-  const pins = pin ? [`WS_ROOT=${root}`] : []
+function mcpAddCommand(tool, root, pin, env, keepEnv = {}) {
+  const { WS_ROOT: _old, ...other } = keepEnv || {}
+  const pins = [...Object.entries(other).map(([k, v]) => `${k}=${v}`), ...(pin ? [`WS_ROOT=${root}`] : [])]
   // Claude's -e takes several values, so it must come after the server name.
   return tool === "claude"
     ? ["claude", "mcp", "add", "--scope", "user", "ws", ...pins.flatMap((e) => ["-e", e]), "--", nodeCommand(env), MCP]
@@ -261,7 +262,10 @@ const geminiCur = (settings) => {
 export function mergeGeminiMcp(settings, { root, pin, command, check = () => true }) {
   const out = structuredClone(settings || {})
   const cur = geminiCur(out)
-  const want = { command, args: [MCP], ...(pin ? { env: { WS_ROOT: root } } : {}) }
+  // Other env vars the user put on the entry are kept; only WS_ROOT is ws's to set.
+  const { WS_ROOT: _oldRoot, ...otherEnv } = cur?.env || {}
+  const env = { ...otherEnv, ...(pin ? { WS_ROOT: root } : {}) }
+  const want = { command, args: [MCP], ...(Object.keys(env).length ? { env } : {}) }
   if (cur && !isWsServer(cur)) return { settings: out, changes: [], notes: [`a different server is registered as "ws" (${cur.args}); left as is`] }
   if (cur && cur.args === MCP && (pin ? cur.env.WS_ROOT === root : !cur.env.WS_ROOT) && check(cur.command)) return { settings: out, changes: [], notes: [] }
   // Keep any other keys the user set on the entry (trust, timeout, …).
@@ -392,10 +396,11 @@ export async function runSetup({ tools, link = true, hooks = true, mcp = true, d
   // 4. MCP server: add, or replace a ws registration that points somewhere else.
   if (mcp) {
     for (const tool of tools.filter((t) => t !== "gemini")) {
-      const add = mcpAddCommand(tool, root, pin, env)
-      const shown = add.map(q).join(" ")
-      if (!runs(tool, undefined, env)) { log(`${tool} MCP: \`${tool}\` not found on PATH; run later:\n  ${shown}`); continue }
+      if (!runs(tool, undefined, env)) { log(`${tool} MCP: \`${tool}\` not found on PATH; run later:\n  ${mcpAddCommand(tool, root, pin, env).map(q).join(" ")}`); continue }
       const cur = currentMcp(tool, env)
+      // Re-adding keeps any other env vars the user set on the entry.
+      const add = mcpAddCommand(tool, root, pin, env, isWsServer(cur) ? cur.env : {})
+      const shown = add.map(q).join(" ")
       if (mcpMatches(cur, root, pin, env)) { log(`${tool} MCP: up to date`); continue }
       if (cur && !isWsServer(cur)) { log(`${tool} MCP: a different server is registered as "ws" (${cur.args}); left as is`); continue }
       if (cur && !cur.user) { log(`${tool} MCP: "ws" is registered in a project or local scope; update it by hand:\n  ${shown}`); continue }

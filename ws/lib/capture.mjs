@@ -260,7 +260,7 @@ async function captureSessionInner({ tool, session_id, transcript_path, cwd, rea
   if (!session_id) return { action: "skip", why: "no session id" }
   if (transcript_path && /\/subagents\/|\/agent-[^/]*\.jsonl$/.test(transcript_path)) return { action: "skip", why: "subagent" }
   cwd = cwd || process.cwd()
-  const list = await store.listWorkstreams()
+  const list = await store.listWorkstreams({ logs: false }) // matching needs cwd and status only
   const { link } = matchWorkstream(list, cwd, wsId)
   // The ignore list only silences sessions that no workstream claims.
   if (!link) for (const ig of await ignoredCwds()) if (under(cwd, ig)) return { action: "skip", why: `ignored cwd ${ig}` }
@@ -329,14 +329,21 @@ const pick = (o, keys) => Object.fromEntries(keys.filter((k) => k in o).map((k) 
 
 // ------------------------------------------------------------------------ inbox
 
-export async function listInbox() {
+// A file that can't be read or parsed is skipped (and reported through `broken`), so one
+// bad hand edit never takes down `ws ls`, search or the board.
+export async function listInbox({ broken } = {}) {
   let files = []
   try { files = (await fs.readdir(INBOX_DIR)).filter((f) => f.endsWith(".md")).sort().reverse() } catch { return [] }
   const out = []
   for (const f of files) {
     const file = path.join(INBOX_DIR, f)
-    const { data } = parseMd(await fs.readFile(file, "utf-8"))
-    out.push({ file, ...data })
+    try {
+      const { data } = parseMd(await fs.readFile(file, "utf-8"))
+      out.push({ file, ...data })
+    } catch (e) {
+      if (e.code === "ENOENT") continue // handled meanwhile
+      broken?.push({ id: `inbox/${f}`, error: String(e instanceof Error ? e.message : e).split("\n")[0].replace(/:\s*$/, "") })
+    }
   }
   return out
 }
@@ -358,7 +365,7 @@ export async function ignoreInbox(entry, { cwd = false } = {}) {
 // ------------------------------------------------------------ session start note
 
 export async function startContext({ cwd, wsId }) {
-  const list = await store.listWorkstreams()
+  const list = await store.listWorkstreams({ logs: false })
   const { link, candidates } = matchWorkstream(list, cwd || process.cwd(), wsId)
   if (link) {
     const w = list.find((x) => x.id === link)

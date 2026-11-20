@@ -632,8 +632,10 @@ export async function drain({ log = () => {} } = {}) {
 export async function listProposals(wsId) {
   const out = []
   let dirs = []
+  if (wsId !== undefined && wsId !== null && !store.isId(wsId)) return []
   try { dirs = wsId ? [wsId] : await fs.readdir(PROPOSALS_DIR) } catch { return [] }
   for (const d of dirs) {
+    if (!store.isId(d)) continue
     let files = []
     // ".md.accepting" is an accept that was interrupted: listed so it can be finished.
     try { files = (await fs.readdir(path.join(PROPOSALS_DIR, d))).filter((f) => f.endsWith(".md") || f.endsWith(".md.accepting")).sort() } catch { continue }
@@ -657,6 +659,7 @@ export async function listProposals(wsId) {
 const proposalKey = (d, summary) => JSON.stringify([d.ws, d.session, String(d.created), d.close || [], d.add || [], d.decide || [], d.unverified || [], String(summary || "").trim()])
 
 export async function acceptProposal(p, opts = {}) {
+  p = { ...p, file: proposalFile(p) }
   const resuming = p.file.endsWith(".accepting")
   const claimed = resuming ? p.file : `${p.file}.accepting`
   if (!resuming) {
@@ -756,6 +759,14 @@ async function applyProposal(p, { close = true, add = true, summary = true, unve
   return applied
 }
 
+// Only ever deletes a draft file inside PROPOSALS_DIR/<id>/.
+function proposalFile(p) {
+  const rel = path.relative(PROPOSALS_DIR, path.resolve(String(p?.file || "")))
+  const [dir, name, ...rest] = rel.split(path.sep)
+  if (rest.length || !store.isId(dir) || !/\.md(\.accepting)?$/.test(name || "")) throw new Error("not a proposal file")
+  return path.join(PROPOSALS_DIR, dir, name)
+}
+
 export async function rejectProposal(p) {
-  await fs.rm(p.file, { force: true })
+  await fs.rm(proposalFile(p), { force: true })
 }

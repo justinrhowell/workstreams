@@ -111,7 +111,9 @@ test("a hook-only session is queued; drain writes a proposal and leaves open.md 
   assert.equal((await store.readOpen("site")).items.filter((i) => i.done).length, 0) // nothing applied yet
 
   const { text } = await compose("site")
-  assert.match(text, /Unreviewed machine summary: Fixed the nav overlap/)
+  // The draft's wording is model output from a transcript, so only a pointer reaches the prompt.
+  assert.match(text, /machine-drafted summary is waiting for the user in `ws review`/)
+  assert.doesNotMatch(text, /Fixed the nav overlap/)
   assert.doesNotMatch(text, /Last session \(.*\): Fixed the nav overlap/)
 })
 

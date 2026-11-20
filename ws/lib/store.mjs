@@ -118,7 +118,7 @@ export async function listWorkstreams({ broken } = {}) {
       if (e.code !== "ENOENT" && e.code !== "ENOTDIR") broken?.push({ id, error: `can't read WORKSTREAM.md (${e.code})` })
       continue
     }
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
+    if (!isId(id)) {
       broken?.push({ id, error: "folder name isn't a workstream id (lowercase letters, digits and dashes)" })
       continue
     }
@@ -132,10 +132,19 @@ export async function listWorkstreams({ broken } = {}) {
   return out.sort((a, b) => b.lastActivity - a.lastActivity)
 }
 
+// Workstream ids are folder names under WS_DIR; anything else (../x, a/b) is refused
+// before a path is built from it.
+export const ID_RE = /^[a-z0-9][a-z0-9-]*$/
+export function isId(id) { return typeof id === "string" && ID_RE.test(id) }
+export function assertId(id) {
+  if (!isId(id)) throw new Error(`No workstream "${id}" (ids are lowercase letters, digits and dashes)`)
+  return id
+}
+
 export async function getWorkstream(id) {
   const dir = path.join(WS_DIR, id)
   const file = path.join(dir, "WORKSTREAM.md")
-  const raw = /^[a-z0-9][a-z0-9-]*$/.test(id) ? await readText(file) : null
+  const raw = isId(id) ? await readText(file) : null
   if (raw === null) throw new Error(`No workstream "${id}" (looked in ${tildify(dir)})`)
   const { data, content } = parseMd(raw)
   const logs = await listLogs(id)
@@ -167,7 +176,7 @@ export async function getWorkstream(id) {
 }
 
 export async function createWorkstream(id, fields) {
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) throw new Error("id must be kebab-case")
+  if (!isId(id)) throw new Error("id must be kebab-case")
   const dir = path.join(WS_DIR, id)
   if (await exists(dir)) throw new Error(`${id} already exists`)
   if (fields?.prefix !== undefined) {
@@ -187,6 +196,7 @@ export async function createWorkstream(id, fields) {
 // return a result). Runs under the workstream's lock, so concurrent updates don't
 // lose each other's fields.
 export async function updateWorkstream(id, patch) {
+  assertId(id)
   const file = path.join(WS_DIR, id, "WORKSTREAM.md")
   return withLock(file, async () => {
     const raw = await readText(file)
@@ -418,6 +428,7 @@ export function renderOpen({ next, items, notes }, title) {
 }
 
 export async function readOpen(id) {
+  assertId(id)
   const file = path.join(WS_DIR, id, "open.md")
   const text = await readText(file)
   if (text === null) return { next: 1, items: [], unparsed: [], notes: [] }
@@ -431,6 +442,7 @@ function refuseUnparsed(file, state, what) {
 }
 
 async function writeOpen(id, state, title) {
+  assertId(id)
   await writeFileAtomic(path.join(WS_DIR, id, "open.md"), renderOpen(state, title))
 }
 
@@ -664,6 +676,7 @@ export function renderDecisions({ next, decisions, notes }, title) {
 }
 
 export async function readDecisions(id) {
+  assertId(id)
   const file = path.join(WS_DIR, id, "decisions.md")
   const text = await readText(file)
   if (text === null) return { next: 1, decisions: [], unparsed: [], notes: [] }
@@ -700,6 +713,7 @@ export async function decide(id, text, { why, rejected, evidence, session, super
 // or summarized; other sessions never touch it.
 
 export async function listLogs(id) {
+  assertId(id)
   const dir = path.join(WS_DIR, id, "log")
   let files = []
   try { files = await fs.readdir(dir) } catch { return [] }

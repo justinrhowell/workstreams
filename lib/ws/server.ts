@@ -190,6 +190,7 @@ export async function trashAction(body: any) {
 }
 
 export async function inboxAction(body: any) {
+  text(body?.session, "session")
   const rows = await capture.listInbox()
   const row = rows.find((r: any) => r.session === body?.session)
   if (!row) throw new Error("inbox row not found (already handled?)")
@@ -199,6 +200,8 @@ export async function inboxAction(body: any) {
 }
 
 export async function reviewAction(body: any) {
+  text(body?.ws, "workstream")
+  text(body?.session, "session")
   const p = (await summarize.listProposals(body?.ws)).find((x: any) => x.session === body?.session)
   if (!p) throw new Error("proposal not found (already handled?)")
   if (body.action === "accept") {

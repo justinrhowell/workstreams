@@ -15,7 +15,7 @@ import { search, formatResult, KINDS } from "../lib/search.mjs"
 const text = (value) => ({ content: [{ type: "text", text: value }] })
 const fail = (e) => ({ content: [{ type: "text", text: `Error: ${e.message}` }], isError: true })
 const safe = (fn) => async (args) => { try { return await fn(args) } catch (e) { return fail(e) } }
-const id = z.string().describe("Workstream id, e.g. acme-site (see ws_list)")
+const id = z.string().regex(store.ID_RE, "ids are lowercase letters, digits and dashes").describe("Workstream id, e.g. acme-site (see ws_list)")
 
 if (platformProblem() || store.ROOT_PROBLEM) {
   console.error(`ws MCP server: ${platformProblem() || store.ROOT_PROBLEM}`)
@@ -54,7 +54,7 @@ server.registerTool(
       "Search every workstream's title, open and closed items, decisions and session logs, plus the inbox. Use it before adding an item (is it already tracked?), before reopening a choice (was it decided?), or to find which session or workstream touched something. All words must match one record; \"quoted phrase\" matches exactly; an ID like BG-3 or BG-D2 finds that record. Each result starts with its state: [closed item] and [superseded decision] are history, not current.",
     inputSchema: {
       query: z.string().min(1).describe("Words to find, e.g. availity eligibility"),
-      ws: z.string().optional().describe("Only this workstream id"),
+      ws: z.string().regex(store.ID_RE, "ids are lowercase letters, digits and dashes").optional().describe("Only this workstream id"),
       kinds: z.array(z.enum(KINDS)).optional().describe("Only these record kinds"),
       current: z.boolean().optional().describe("Leave out closed items, superseded decisions and done/archived workstreams"),
       limit: z.number().int().min(1).max(200).optional().describe("Most results to return (default 20)"),

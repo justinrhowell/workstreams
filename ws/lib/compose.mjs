@@ -114,8 +114,13 @@ export async function compose(id, { tool, inline = false } = {}) {
 
   const parts = [`Continuing ${ws.title}.${ws.brief ? " " + ws.brief : ""}`]
   if (read.length) parts.push(`Read these first:\n${read.join("\n")}`)
-  parts.push(fillVars(ws.input, vars))
-  if (ws.procedure) parts.push(fillVars((await getProcedure(ws.procedure)).body, vars))
+  // Only the input slot and procedure are templates. Items, decisions, the brief and logs
+  // are free text, so a literal {{ … }} there (Liquid, Jinja) is left alone.
+  const templated = [fillVars(ws.input, vars)]
+  if (ws.procedure) templated.push(fillVars((await getProcedure(ws.procedure)).body, vars))
+  const leftover = variablesIn(templated.join("\n"))
+  if (leftover.length) throw new Error(`Unfilled vars in ${id}: ${leftover.join(", ")}`)
+  parts.push(...templated)
 
   const decided = (await readDecisions(id)).decisions.filter((d) => d.active)
   if (decided.length) {
@@ -139,13 +144,14 @@ export async function compose(id, { tool, inline = false } = {}) {
     parts.push(`Last session (${[when, last.tool].filter(Boolean).join(", ")}): ${last.summary.split("\n")[0]}`)
   }
   if (later.length) {
-    const drafts = new Map((await listProposals(id)).map((p) => [p.session, p.summary]))
+    // Unreviewed drafts are model output from transcripts that may quote untrusted text, so
+    // their wording never goes into the prompt (sent as the user's message); only a pointer.
+    const drafts = new Set((await listProposals(id)).map((p) => p.session))
     parts.push(`Sessions since then with no notes (check their changes):\n` +
-      later.slice(-3).map((l) => {
-        const d = drafts.get(l.session)
-        return `- ${String(l.ended || "").slice(0, 10)} ${l.tool || ""} "${l.title || "untitled"}"` +
-          (d ? `. Unreviewed machine summary: ${d.split("\n")[0]}` : "")
-      }).join("\n"))
+      later.slice(-3).map((l) =>
+        `- ${String(l.ended || "").slice(0, 10)} ${l.tool || ""} "${l.title || "untitled"}"` +
+          (drafts.has(l.session) ? " (a machine-drafted summary is waiting for the user in `ws review`)" : ""),
+      ).join("\n"))
   }
 
   parts.push(
@@ -158,7 +164,5 @@ export async function compose(id, { tool, inline = false } = {}) {
   if (included.length) parts.push(`## Included files\n\n${included.join("\n\n")}`)
 
   const text = parts.join("\n\n") + "\n"
-  const leftover = variablesIn(text.split("## Included files")[0])
-  if (leftover.length) throw new Error(`Unfilled vars in ${id}: ${leftover.join(", ")}`)
   return { ws, tool, text }
 }

@@ -234,7 +234,7 @@ const commandWorks = (cmd, env) => cmd === "node"
 const mcpMatches = (cur, root, pin, env) => cur && cur.args === MCP && (pin ? cur.env.WS_ROOT === root : !cur.env.WS_ROOT) && commandWorks(cur.command, env)
 const isWsServer = (cur) => cur && /(^|\/)ws\/mcp\/server\.mjs$/.test(cur.args)
 
-function mcpAddCommand(tool, root, pin, env, keepEnv = {}) {
+export function mcpAddCommand(tool, root, pin, env, keepEnv = {}) {
   const { WS_ROOT: _old, ...other } = keepEnv || {}
   const pins = [...Object.entries(other).map(([k, v]) => `${k}=${v}`), ...(pin ? [`WS_ROOT=${root}`] : [])]
   // Claude's -e takes several values, so it must come after the server name.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ws: save and recall workstream state across Claude Code and Codex sessions.
 import { spawnSync } from "node:child_process"
-import { promises as fs } from "node:fs"
+import { promises as fs, existsSync } from "node:fs"
 import { parseArgs } from "node:util"
 import readline from "node:readline/promises"
 import path from "node:path"
@@ -516,7 +516,15 @@ function stableNode() {
   return process.execPath
 }
 
+// Without the board's dependencies, npx would try to download Next instead of saying so.
+function needBoardDeps() {
+  if (!existsSync(path.join(boardApp(), "node_modules", "next", "package.json"))) {
+    die(`The board's dependencies aren't installed. Run: npm --prefix "${boardApp()}" ci`)
+  }
+}
+
 function buildBoard() {
+  needBoardDeps()
   console.log("Building the board (production)…")
   const r = spawnSync("npx", ["next", "build"], { cwd: boardApp(), stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, NEXT_DIST_DIR: BOARD_DIST } })
   if (r.status !== 0) die("Build failed; the service was not changed.")
@@ -591,6 +599,7 @@ async function cmdBoardSystemd() {
 
 // No service (or --dev): a dev server in this terminal.
 function devBoard() {
+  needBoardDeps()
   const port = String(opt.port || BOARD_PORT)
   if (!opt.dev) console.log(dim("Tip: ws board --install keeps it running in the background."))
   console.log(`Board: http://127.0.0.1:${port}  (data: ${store.tildify(store.ROOT)}; Ctrl-C to stop)`)

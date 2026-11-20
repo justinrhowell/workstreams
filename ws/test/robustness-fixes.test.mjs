@@ -93,3 +93,19 @@ test("hooks list workstreams without reading their logs", async () => {
   assert.deepEqual(w.logs, [])
   assert.equal(cap.matchWorkstream(list, site).link, "site")
 })
+
+test("setup re-adds the Claude/Codex ws server with the user's other env vars", () => {
+  const keep = { WS_ROOT: "/old", FOO: "1" }
+  const claude = S.mcpAddCommand("claude", "/d", true, process.env, keep)
+  assert.deepEqual(claude.filter((a, i) => claude[i - 1] === "-e"), ["FOO=1", "WS_ROOT=/d"])
+  const codex = S.mcpAddCommand("codex", "/d", false, process.env, keep)
+  assert.deepEqual(codex.filter((a, i) => codex[i - 1] === "--env"), ["FOO=1"])
+})
+
+test("ws board without the board's dependencies says to run npm ci", async () => {
+  const app = path.dirname(path.dirname(path.dirname(BIN)))
+  try { await fs.access(path.join(app, "node_modules", "next", "package.json")); return } catch {} // deps installed: nothing to check
+  const r = ws("board", "--dev", "--no-open")
+  assert.notEqual(r.status, 0)
+  assert.match(r.stderr, /npm --prefix .* ci/)
+})

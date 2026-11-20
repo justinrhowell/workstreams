@@ -7,7 +7,7 @@ import readline from "node:readline/promises"
 import path from "node:path"
 import os from "node:os"
 import * as store from "../lib/store.mjs"
-import { compose, checkSources, stalePathsIn } from "../lib/compose.mjs"
+import { compose, checkSources, stalePathsIn, launchArgv } from "../lib/compose.mjs"
 import * as capture from "../lib/capture.mjs"
 import * as summarize from "../lib/summarize.mjs"
 import { search, formatResult } from "../lib/search.mjs"
@@ -29,7 +29,8 @@ const HELP = `ws: workstream state for Claude Code, Codex and Gemini CLI   (data
                                    search titles, items, decisions, session logs and the inbox ("quoted phrase"; BG-3 finds that ID)
   ws prompt <id> [--tool codex] [--inline] [--no-copy]
                                    print the resume prompt and copy it to the clipboard
-  ws go <id> [--codex] [--resume]  edit the prompt (fill the input slot), then launch in cwd
+  ws go <id> [--codex|--gemini] [--resume]
+                                   edit the prompt (fill the input slot), then launch in cwd
   ws new <id> --title T --cwd DIR [--group G] [--prefix P] [--tool claude|codex|gemini]
   ws archive <id> | ws unarchive <id>   hide a finished workstream (kept; unarchive restores its status)
   ws delete <id> [--yes]           move it to the trash (restorable)
@@ -174,14 +175,14 @@ async function ask(q) {
 }
 
 // Tools `ws go` can launch, with the argv shape each one takes.
-const LAUNCHABLE = ["claude", "codex"]
-const TOOLS = [...LAUNCHABLE, "gemini"]
+const LAUNCHABLE = ["claude", "codex", "gemini"]
+const TOOLS = LAUNCHABLE
 
 async function cmdGo(id) {
-  const tool = opt.codex ? "codex" : opt.claude ? "claude" : opt.tool || undefined
+  const tool = opt.codex ? "codex" : opt.claude ? "claude" : opt.gemini ? "gemini" : opt.tool || undefined
   if (tool && !TOOLS.includes(tool)) die(`--tool must be one of ${TOOLS.join(", ")}`)
   const { ws, tool: t, text } = await compose(id, { tool, inline: opt.inline })
-  if (!LAUNCHABLE.includes(t)) die(`ws go can't launch ${t} yet. Run \`ws prompt ${id} --tool ${t}\` and paste the prompt, or use --tool claude|codex.`)
+  if (!LAUNCHABLE.includes(t)) die(`ws go can't launch ${t} yet. Run \`ws prompt ${id} --tool ${t}\` and paste the prompt, or use --tool claude|codex|gemini.`)
   const tmp = path.join(os.tmpdir(), `ws-${id}-${Date.now()}.md`)
   await fs.writeFile(tmp, text)
   // $VISUAL, then $EDITOR, then nano. Run through the shell so quoted paths and
@@ -207,9 +208,7 @@ async function cmdGo(id) {
     if (fresh) resumeId = last.session
     else console.error(dim(`No ${t} session in the last ${RESUME_WINDOW_H}h; starting fresh.`))
   }
-  const argv = t === "codex"
-    ? (resumeId ? ["resume", resumeId, edited] : [edited])
-    : (resumeId ? ["--resume", resumeId, edited] : ["-n", ws.title, edited])
+  const argv = launchArgv(t, edited, { resumeId, title: ws.title })
   const cwd = ws.cwd || process.cwd()
   console.error(dim(`→ ${t}${resumeId ? ` (resume ${resumeId.slice(0, 8)})` : ""} in ${store.tildify(cwd)}`))
   const r = spawnSync(t, argv, { stdio: "inherit", cwd, env: { ...process.env, WS_ID: id } })

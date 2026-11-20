@@ -9,7 +9,7 @@ import matter from "gray-matter"
 // later reads of identical text. Passing options disables the cache.
 const parseMd = (text) => matter(text, {})
 import { codexDir } from "./paths.mjs"
-import { loadGeminiSession, partText, wsToolName } from "./gemini.mjs"
+import { loadGeminiSession, partText, wsToolName, isGeminiInjected } from "./gemini.mjs"
 import * as store from "./store.mjs"
 import * as summarize from "./summarize.mjs"
 
@@ -113,7 +113,7 @@ function parseGemini(text, info) {
   info.ended = meta.lastUpdated || messages.at(-1)?.timestamp || null
   for (const m of messages) {
     if (m.timestamp && (!info.ended || m.timestamp > info.ended)) info.ended = m.timestamp
-    if (m.type === "user" && partText(m.content).trim()) info.userTurns++
+    if (m.type === "user" && partText(m.content).trim() && !isGeminiInjected(partText(m.content))) info.userTurns++
     if (m.type !== "gemini" || !Array.isArray(m.toolCalls)) continue
     for (const tc of m.toolCalls) {
       info.toolCalls++

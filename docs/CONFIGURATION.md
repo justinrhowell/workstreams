@@ -97,7 +97,7 @@ title: Acme site rebuild
 status: active            # active | waiting | parked | done (archive with `ws archive`)
 waiting_on: "client: copy for the pricing page"
 cwd: ~/code/acme-site     # sessions under this folder are linked to this workstream
-tool: claude              # default for `ws go`: claude | codex
+tool: claude              # default for `ws go`: claude | codex | gemini
 group: clients            # optional, for grouping on the board
 prefix: AS                # item IDs: AS-1, AS-2, decisions AS-D1
 procedure: site-qa        # optional: procedures/site-qa.md

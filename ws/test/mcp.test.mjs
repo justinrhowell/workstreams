@@ -47,6 +47,10 @@ test("item lifecycle, log and status round-trip through the files", async () => 
   assert.equal((await store.readOpen("demo")).items.find((i) => i.id === "DM-2").done, true)
 
   assert.match((await call("ws_compose", { id: "demo", tool: "codex" })).text, /^Continuing Demo work\.[\s\S]*DM-1/)
+  // Gemini CLI is a supported target here too, not only through `ws prompt`.
+  const gem = await call("ws_compose", { id: "demo", tool: "gemini" })
+  assert.equal(gem.isError, false, gem.text)
+  assert.match(gem.text, /--tool gemini/)
   assert.match((await call("ws_list")).text, /demo \[waiting\] Demo work: 1 open; waiting on Reviewer/)
 })
 

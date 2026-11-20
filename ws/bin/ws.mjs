@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ws: save and recall workstream state across Claude Code and Codex sessions.
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { promises as fs, existsSync } from "node:fs"
 import { parseArgs } from "node:util"
 import readline from "node:readline/promises"
@@ -29,7 +29,7 @@ const HELP = `ws: workstream state for Claude Code, Codex and Gemini CLI   (data
                                    search titles, items, decisions, session logs and the inbox ("quoted phrase"; BG-3 finds that ID)
   ws prompt <id> [--tool codex] [--inline] [--no-copy]
                                    print the resume prompt and copy it to the clipboard
-  ws go <id> [--codex|--gemini] [--resume]
+  ws go <id> [--claude|--codex|--gemini] [--resume]
                                    edit the prompt (fill the input slot), then launch in cwd
   ws new <id> --title T --cwd DIR [--group G] [--prefix P] [--tool claude|codex|gemini]
   ws archive <id> | ws unarchive <id>   hide a finished workstream (kept; unarchive restores its status)
@@ -90,7 +90,7 @@ const ago = (ms) => {
 
 async function counts() {
   const broken = []
-  const [inbox, props, queue, failed] = await Promise.all([capture.listInbox({ broken }), summarize.listProposals(), summarize.listQueue(), summarize.listFailed()])
+  const [inbox, props, queue, failed] = await Promise.all([capture.listInbox({ broken }), summarize.listProposals(undefined, { broken }), summarize.listQueue(), summarize.listFailed()])
   reportBroken(broken)
   const bits = [inbox.length && `${inbox.length} in inbox (ws inbox)`, props.length && `${props.length} to review (ws review)`, queue.length && `${queue.length} queued`,
     failed.length && `${failed.length} summaries failed (ws summarize --requeue)`].filter(Boolean)
@@ -183,18 +183,26 @@ async function cmdGo(id) {
   if (tool && !TOOLS.includes(tool)) die(`--tool must be one of ${TOOLS.join(", ")}`)
   const { ws, tool: t, text } = await compose(id, { tool, inline: opt.inline })
   if (!LAUNCHABLE.includes(t)) die(`ws go can't launch ${t} yet. Run \`ws prompt ${id} --tool ${t}\` and paste the prompt, or use --tool claude|codex|gemini.`)
-  const tmp = path.join(os.tmpdir(), `ws-${id}-${Date.now()}.md`)
-  await fs.writeFile(tmp, text)
-  // $VISUAL, then $EDITOR, then nano. Run through the shell so quoted paths and
-  // arguments in the variable ("code --wait", "/Applications/My Editor/bin/ed") work.
-  const editor = process.env.VISUAL || process.env.EDITOR || "nano"
-  // Put the cursor on the input slot where the editor supports +LINE.
-  const slotLine = text.split("\n").findIndex((l) => l.includes(store.fillVars(ws.input, { title: ws.title, ...ws.vars }).split("\n")[0])) + 1
-  const edArgs = /(^|\/)(nano|vim?|nvim|emacs|micro)['"]?$/.test(editor.trim().split(/\s+/)[0]) && slotLine > 0 ? [`+${slotLine}`, tmp] : [tmp]
-  const ed = spawnSync("sh", ["-c", `${editor} "$@"`, "ws-editor", ...edArgs], { stdio: "inherit" })
-  if (ed.status !== 0) die(`editor exited with ${ed.status}; not launching`)
-  const edited = (await fs.readFile(tmp, "utf-8")).trim()
-  await fs.rm(tmp, { force: true })
+  // The prompt can hold inlined notes and sources: it goes in a folder only this user can
+  // read (mkdtemp makes it 0700; the file is 0600), and the folder is removed however the
+  // editor ends.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ws-go-"))
+  const tmp = path.join(dir, `${id}.md`)
+  let ed, edited = ""
+  try {
+    await fs.writeFile(tmp, text, { mode: 0o600, flag: "wx" })
+    // $VISUAL, then $EDITOR, then nano. Run through the shell so quoted paths and
+    // arguments in the variable ("code --wait", "/Applications/My Editor/bin/ed") work.
+    const editor = process.env.VISUAL || process.env.EDITOR || "nano"
+    // Put the cursor on the input slot where the editor supports +LINE.
+    const slotLine = text.split("\n").findIndex((l) => l.includes(store.fillVars(ws.input, { title: ws.title, ...ws.vars }).split("\n")[0])) + 1
+    const edArgs = /(^|\/)(nano|vim?|nvim|emacs|micro)['"]?$/.test(editor.trim().split(/\s+/)[0]) && slotLine > 0 ? [`+${slotLine}`, tmp] : [tmp]
+    ed = spawnSync("sh", ["-c", `${editor} "$@"`, "ws-editor", ...edArgs], { stdio: "inherit" })
+    if (ed.status === 0) edited = (await fs.readFile(tmp, "utf-8")).trim()
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+  if (ed.status !== 0) die(`editor exited with ${ed.status ?? ed.signal}; not launching`)
   if (!edited) die("Prompt is empty; not launching.")
   if (edited === text.trim() && /\[[^\]]*\]/.test(ws.input)) {
     const a = await ask("The input slot wasn't filled. Launch anyway? [y/N] ")
@@ -212,7 +220,9 @@ async function cmdGo(id) {
   const cwd = ws.cwd || process.cwd()
   console.error(dim(`→ ${t}${resumeId ? ` (resume ${resumeId.slice(0, 8)})` : ""} in ${store.tildify(cwd)}`))
   const r = spawnSync(t, argv, { stdio: "inherit", cwd, env: { ...process.env, WS_ID: id } })
-  process.exit(r.status ?? 0)
+  if (r.error) die(r.error.code === "ENOENT" ? `Couldn't start ${t}: it isn't on your PATH.` : `Couldn't start ${t}: ${r.error.message}`)
+  // Killed by a signal: exit the way a shell reports it (128 + the signal's number).
+  process.exit(r.status ?? 128 + (os.constants.signals[r.signal] || 0))
 }
 
 async function cmdPick() {
@@ -457,14 +467,16 @@ async function cmdSummarize(id) {
 }
 
 async function cmdReview(sub, n) {
-  const props = await summarize.listProposals()
+  const broken = []
+  const props = await summarize.listProposals(undefined, { broken })
+  reportBroken(broken)
   const pick = () => props[Number(need(n, "<n>")) - 1] || die(`No proposal ${n}. Run \`ws review\`.`)
   if (!sub || sub === "ls") {
     if (!props.length) return console.log("Nothing to review.")
     props.forEach((p, i) => console.log(
       `${String(i + 1).padStart(3)}. ${bold(p.ws)} ${dim(`${String(p.created).slice(0, 10)} ${p.tool} ${store.sessionTag(p.session)}`)}\n` +
       `     ${p.summary.split("\n")[0]}\n` +
-      (p.close || []).map((c) => `     close ${c.id}  ${dim(c.evidence)}`).join("\n") + ((p.close || []).length ? "\n" : "") +
+      (p.close || []).map((c) => `     close ${c.id}${c.item ? ` ${c.item}` : ""}  ${dim(c.evidence)}`).join("\n") + ((p.close || []).length ? "\n" : "") +
       (p.add || []).map((a) => `     add   ${a.text}${a.waiting ? dim(`  @${a.waiting}`) : ""}`).join("\n") + ((p.add || []).length ? "\n" : "") +
       (p.unverified || []).map((u) => dim(`     unverified close ${u.id} (${u.failed}): ${u.evidence}  → add --confirm ${u.id}`)).join("\n") + ((p.unverified || []).length ? "\n" : "") +
       (p.decide || []).map((d, k) => d.unverified
@@ -481,7 +493,7 @@ async function cmdReview(sub, n) {
     const r = await summarize.acceptProposal(p, { close: !opt["no-close"], add: !opt["no-add"], summary: !opt["no-summary"], unverified: confirm, decide: !opt["no-decide"], confirmDecisions })
     console.log(`Applied to ${p.ws}: closed ${r.closed.join(", ") || "none"}; added ${r.added.join(", ") || "none"}; decided ${r.decided.join(", ") || "none"}` + (r.skipped.length ? `\nSkipped: ${r.skipped.join("; ")}` : ""))
   } else if (sub === "reject") {
-    const p = pick(); await summarize.rejectProposal(p); console.log(`Rejected proposal for ${p.ws}.`)
+    const p = pick(); await summarize.rejectProposal(p, { fingerprint: summarize.proposalFingerprint(p) }); console.log(`Rejected proposal for ${p.ws}.`)
   } else die(`unknown: ws review ${sub}`)
 }
 
@@ -499,10 +511,10 @@ const BOARD_DIST = ".next-prod"
 const boardApp = () => path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 const gui = () => `gui/${process.getuid()}`
 
-async function boardUp(timeoutMs = 0) {
+async function boardUp(timeoutMs = 0, url = BOARD_URL) {
   const until = Date.now() + timeoutMs
   for (;;) {
-    try { if ((await fetch(`${BOARD_URL}/api/ws`, { signal: AbortSignal.timeout(2000) })).ok) return true } catch {}
+    try { if ((await fetch(`${url}/api/ws`, { signal: AbortSignal.timeout(2000) })).ok) return true } catch {}
     if (Date.now() >= until) return false
     await new Promise((r) => setTimeout(r, 500))
   }
@@ -596,15 +608,23 @@ async function cmdBoardSystemd() {
   return devBoard()
 }
 
-// No service (or --dev): a dev server in this terminal.
-function devBoard() {
+// No service (or --dev): a dev server in this terminal. Started without blocking, so the
+// page can be opened once the server answers.
+async function devBoard() {
   needBoardDeps()
   const port = String(opt.port || BOARD_PORT)
+  const url = `http://127.0.0.1:${port}`
   if (!opt.dev) console.log(dim("Tip: ws board --install keeps it running in the background."))
-  console.log(`Board: http://127.0.0.1:${port}  (data: ${store.tildify(store.ROOT)}; Ctrl-C to stop)`)
-  setTimeout(() => openUrl(`http://127.0.0.1:${port}`), 4000).unref?.()
-  const r = spawnSync("npx", ["next", "dev", "-H", "127.0.0.1", "-p", port], { cwd: boardApp(), stdio: "inherit", env: process.env })
-  process.exit(r.status ?? 0)
+  console.log(`Board: ${url}  (data: ${store.tildify(store.ROOT)}; Ctrl-C to stop)`)
+  const child = spawn("npx", ["next", "dev", "-H", "127.0.0.1", "-p", port], { cwd: boardApp(), stdio: "inherit", env: process.env })
+  // Ctrl-C reaches the server too; wait for it to stop and pass on its exit code.
+  process.on("SIGINT", () => {})
+  const exited = new Promise((ok) => {
+    child.on("error", (e) => { console.error(`Couldn't start the board: ${e.message}`); ok(1) })
+    child.on("exit", (code, signal) => ok(code ?? (signal ? 128 + (os.constants.signals[signal] || 0) : 0)))
+  })
+  boardUp(120_000, url).then((up) => { if (up && child.exitCode === null) openUrl(url) })
+  process.exit(await exited)
 }
 
 async function cmdBoard() {
@@ -694,7 +714,7 @@ async function cmdBoard() {
     return
   }
 
-  return devBoard()
+  return await devBoard()
 }
 
 async function cmdSetup() {

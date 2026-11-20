@@ -5,6 +5,7 @@
 import { promises as fs, existsSync } from "node:fs"
 import path from "node:path"
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import matter from "gray-matter"
 
@@ -488,6 +489,7 @@ export function validateProposal(raw, openItems, digest = null, decided = []) {
   const summary = str(p.summary)
   if (!summary) throw new Error("empty summary")
   const byId = new Map(openItems.map((i) => [i.id.toUpperCase(), i]))
+  const seenText = (id) => (typeof byId.get(id)?.text === "string" ? { item: byId.get(id).text } : {})
   // A close is evidence of work done, so it must quote the assistant or a tool, never the
   // user's request. A decision is the user's, so it must quote the user.
   const linesOf = (pred) => norm(String(digest).split("\n").filter(pred).join("\n"))
@@ -515,11 +517,12 @@ export function validateProposal(raw, openItems, digest = null, decided = []) {
     .filter((c) => {
       if (!openIds.has(c.id) || !(c.quote || c.evidence)) return false
       const why = checkClose(c)
-      if (why) unverified.push({ id: c.id, evidence: c.evidence || c.quote, failed: why })
+      if (why) unverified.push({ id: c.id, ...seenText(c.id), evidence: c.evidence || c.quote, failed: why })
       return !why
     })
     .filter((c) => once(c.id)) // the model may repeat an ID; one close per item
-    .map((c) => ({ id: c.id, evidence: c.quote ? `"${c.quote}"${c.evidence ? `: ${c.evidence}` : ""}` : c.evidence }))
+    // `item` is the text the model saw: accepting leaves the item open if it was reworded since.
+    .map((c) => ({ id: c.id, ...seenText(c.id), evidence: c.quote ? `"${c.quote}"${c.evidence ? `: ${c.evidence}` : ""}` : c.evidence }))
     .slice(0, 5)
   const add = (Array.isArray(p.add) ? p.add : [])
     .map((a) => ({ text: str(a?.text), waiting: str(a?.waiting) || null }))
@@ -565,15 +568,18 @@ export async function processJob(job, cfg) {
   await fs.mkdir(dir, { recursive: true })
   const file = path.join(dir, `${store.sessionTag(job.session)}.md`)
   const data = { ws: job.ws, session: job.session, tool: job.tool, log: job.log, model, created: new Date().toISOString(), close: proposal.close, add: proposal.add, unverified: proposal.unverified, decide: proposal.decide }
+  for (const k of Object.keys(data)) if (data[k] === undefined) delete data[k] // YAML can't hold undefined (a job queued without a log)
   // Deleted while the model was working, or the job was re-queued (a newer session end):
   // don't publish this generation's proposal.
   const gone = await fs.access(ws.file).then(() => false, (e) => (e.code === "ENOENT" ? true : Promise.reject(e)))
   if (gone) return { skipped: "workstream deleted during summary" }
-  const publish = async () => {
+  // Under the draft's lock (as accept and reject take it), so a review never acts on a
+  // draft that is being replaced.
+  const publish = () => store.withLock(file, async () => {
     if (job.file && job.token && !(await sameJob(job))) return false
     await store.writeFileAtomic(file, matter.stringify(`\n${proposal.summary}\n`, data))
     return true
-  }
+  })
   const published = job.file ? await store.withLock(job.file, publish) : await publish()
   if (!published) return { skipped: "job was re-queued; the newer run will draft it" }
   return { file, proposal }
@@ -610,60 +616,106 @@ async function sameJob(job) {
   try { return JSON.parse(await fs.readFile(job.file, "utf-8")).token === job.token } catch { return false }
 }
 
+const jobKey = (j) => `${j.file}\0${j.token}`
+
 export async function drain({ log = () => {} } = {}) {
   const cfg = await llmConfig()
   if (!cfg) return { done: 0, failed: 0, note: "no llm configured" }
+  const tried = new Set()
+  let done = 0, failed = 0
+  for (let pass = 0; ; pass++) {
+    const r = await drainOnce(cfg, tried, log)
+    done += r.done; failed += r.failed
+    // On a later pass, "another drain is running" means that drain has the new jobs.
+    if (r.note) return { done, failed, ...(pass === 0 || !r.busy ? { note: r.note } : {}) }
+    if (r.stopped) return { done, failed }
+    // A job queued after the last scan but before the lock was released: its own drain saw
+    // the lock and left. Look once more now that the lock is free; a job queued after this
+    // check gets a drain of its own that finds no lock.
+    if (!(await listQueue()).some((j) => !tried.has(jobKey(j)))) return { done, failed }
+  }
+}
+
+async function drainOnce(cfg, tried, log) {
   const lock = path.join(QUEUE_DIR, ".drain.lock")
   const token = `${process.pid}-${Math.random().toString(36).slice(2)}`
-  if (!(await takeDrainLock(lock, cfg, token))) return { done: 0, failed: 0, note: "another drain is running" }
+  if (!(await takeDrainLock(lock, cfg, token))) return { done: 0, failed: 0, busy: true, note: "another drain is running" }
   const beat = setInterval(() => { const t = new Date(); fs.utimes(lock, t, t).catch(() => {}) }, 5_000)
   beat.unref?.()
-  let done = 0, failed = 0
+  let done = 0, failed = 0, stopped = false
   try {
     const up = await endpointStatus(cfg)
     if (!up.ok) return { done, failed, note: `model endpoint ${up.why}; queue kept` }
-    for (const job of await listQueue()) {
-      try {
-        const r = await processJob(job, cfg)
-        // Check-and-remove under the job's lock, so a re-queue can't land in between.
-        await store.withLock(job.file, async () => { if (await sameJob(job)) await fs.rm(job.file, { force: true }) })
-        done++
-        log(`${job.ws} ${store.sessionTag(job.session)}: ${r.skipped || "proposal written"}`)
-      } catch (e) {
-        failed++
-        const isTransient = e.transient || e.name === "TimeoutError" || e.name === "AbortError" || /fetch failed|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(String(e.message))
-        // Stop the whole drain only for trouble every job would hit: a bad key or URL, rate
-        // limiting, or an endpoint that no longer answers. Otherwise move on to the next job,
-        // so one job that always times out can't starve the ones queued behind it.
-        const stop = isTransient && (e.config || /HTTP 429/.test(String(e.message)) || !(await endpointUp(cfg)))
-        if (!isTransient) job.attempts = (job.attempts || 0) + 1
-        else if (!stop) job.transientFails = (job.transientFails || 0) + 1
-        job.lastError = redact(String(e.message || e).slice(0, 2000)).slice(0, 300)
-        const { file, ...rest } = job
-        await store.withLock(file, async () => {
-          if (!(await sameJob(job))) return
-          if (job.attempts >= MAX_ATTEMPTS || (job.transientFails || 0) >= MAX_TRANSIENT) {
-            await fs.mkdir(path.join(QUEUE_DIR, "failed"), { recursive: true })
-            await store.writeFileAtomic(path.join(QUEUE_DIR, "failed", path.basename(file)), JSON.stringify(rest, null, 2))
-            await fs.rm(file, { force: true })
-          } else {
-            await store.writeFileAtomic(file, JSON.stringify(rest, null, 2))
-          }
-        })
-        log(`${job.ws} ${store.sessionTag(job.session)}: failed (${job.lastError})`)
-        if (stop) break // endpoint or config trouble: stop, retry later without charging any job
+    // Jobs queued while this drain runs are picked up too: their own spawned drain found the
+    // lock taken and left. Each job version (file + token) is tried once per drain, so a job
+    // that just failed waits for the next drain instead of being retried in a loop.
+    for (let jobs; !stopped && (jobs = (await listQueue()).filter((j) => !tried.has(jobKey(j)))).length;) {
+      for (const job of jobs) {
+        tried.add(jobKey(job))
+        try {
+          const r = await processJob(job, cfg)
+          // Check-and-remove under the job's lock, so a re-queue can't land in between.
+          await store.withLock(job.file, async () => { if (await sameJob(job)) await fs.rm(job.file, { force: true }) })
+          done++
+          log(`${job.ws} ${store.sessionTag(job.session)}: ${r.skipped || "proposal written"}`)
+        } catch (e) {
+          failed++
+          const isTransient = e.transient || e.name === "TimeoutError" || e.name === "AbortError" || /fetch failed|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(String(e.message))
+          // Stop the whole drain only for trouble every job would hit: a bad key or URL, rate
+          // limiting, or an endpoint that no longer answers. Otherwise move on to the next job,
+          // so one job that always times out can't starve the ones queued behind it.
+          const stop = isTransient && (e.config || /HTTP 429/.test(String(e.message)) || !(await endpointUp(cfg)))
+          if (!isTransient) job.attempts = (job.attempts || 0) + 1
+          else if (!stop) job.transientFails = (job.transientFails || 0) + 1
+          job.lastError = redact(String(e.message || e).slice(0, 2000)).slice(0, 300)
+          const { file, ...rest } = job
+          await store.withLock(file, async () => {
+            if (!(await sameJob(job))) return
+            if (job.attempts >= MAX_ATTEMPTS || (job.transientFails || 0) >= MAX_TRANSIENT) {
+              await fs.mkdir(path.join(QUEUE_DIR, "failed"), { recursive: true })
+              await store.writeFileAtomic(path.join(QUEUE_DIR, "failed", path.basename(file)), JSON.stringify(rest, null, 2))
+              await fs.rm(file, { force: true })
+            } else {
+              await store.writeFileAtomic(file, JSON.stringify(rest, null, 2))
+            }
+          })
+          log(`${job.ws} ${store.sessionTag(job.session)}: failed (${job.lastError})`)
+          if (stop) { stopped = true; break } // endpoint or config trouble: stop, retry later without charging any job
+        }
       }
     }
   } finally {
     clearInterval(beat)
     await releaseDrainLock(lock, token)
   }
-  return { done, failed }
+  return { done, failed, stopped }
 }
 
 // ------------------------------------------------------------------ review
 
-export async function listProposals(wsId) {
+// The shape `ws review` and the board rely on. A hand-edited or damaged draft that doesn't
+// fit is reported instead of crashing them on a missing field or a value that isn't text.
+const DRAFT_LISTS = { close: "id", unverified: "id", add: "text", decide: "text" }
+function checkDraft(data) {
+  if (typeof data.ws !== "string" || typeof data.session !== "string" || !data.session) throw new Error("missing ws or session")
+  // Shown as text: a map or list here would break the board's rendering. (An unquoted date
+  // in `created` parses as a Date, which is fine.)
+  for (const k of ["model", "tool", "log", "created"]) {
+    const v = data[k]
+    if (v != null && typeof v === "object" && !(v instanceof Date)) throw new Error(`${k} must be text`)
+  }
+  for (const [k, need] of Object.entries(DRAFT_LISTS)) {
+    const v = data[k]
+    if (v === undefined || v === null) continue
+    const ok = Array.isArray(v) && v.every((x) => x && typeof x === "object" && !Array.isArray(x) && typeof x[need] === "string" &&
+      Object.entries(x).every(([f, y]) => (f === "rejected" ? y == null || (Array.isArray(y) && y.every((r) => typeof r === "string")) : y == null || typeof y !== "object")))
+    if (!ok) throw new Error(`${k} must be a list of entries, each with a text "${need}"`)
+  }
+}
+
+// A draft that can't be read or parsed, or doesn't have the expected shape, is skipped
+// and reported through `broken`, so one damaged file never takes down `ws review` or the board.
+export async function listProposals(wsId, { broken } = {}) {
   const out = []
   let dirs = []
   if (wsId !== undefined && wsId !== null && !store.isId(wsId)) return []
@@ -677,38 +729,57 @@ export async function listProposals(wsId) {
       const file = path.join(PROPOSALS_DIR, d, f)
       let text
       try { text = await fs.readFile(file, "utf-8") } catch { continue } // accepted meanwhile
-      const { data, content } = parseMd(store.normalizeEol(text))
-      out.push({ file, ...data, summary: content.trim(), ...(f.endsWith(".accepting") ? { interrupted: true } : {}) })
+      // An empty claim was left by an accept in ws 0.2.1 or earlier that died right after reserving its name: nothing to show.
+      if (f.endsWith(".accepting") && !text.trim()) continue
+      try {
+        const { data, content } = parseMd(store.normalizeEol(text))
+        checkDraft(data)
+        out.push({ file, ...data, summary: content.trim(), ...(f.endsWith(".accepting") ? { interrupted: true } : {}) })
+      } catch (e) {
+        broken?.push({ id: `proposals/${d}/${f}`, error: String(e instanceof Error ? e.message : e).split("\n")[0].replace(/:\s*$/, "") })
+      }
     }
   }
   return out.sort((a, b) => String(a.created).localeCompare(String(b.created)))
 }
 
 // Accepting is exclusive and safe to retry:
-// - the proposal is claimed by hard-linking it to <file>.accepting (fails if anyone else
-//   already claimed it), and the claimed copy must be the one the reviewer selected;
+// - under the draft's lock, the draft is checked against the one the reviewer selected and
+//   renamed to <file>.accepting (a second accept then finds it gone);
 // - each step (a decision, a close, an add, the summary) is recorded in the claimed file
 //   as it lands, so if the process dies or a step fails partway, accepting again finishes
 //   the remaining steps instead of applying the done ones twice.
 const proposalKey = (d, summary) => JSON.stringify([d.ws, d.session, String(d.created), d.close || [], d.add || [], d.decide || [], d.unverified || [], String(summary || "").trim()])
+
+// A short digest of everything an accept would apply. A reviewer (the board) sends back the
+// fingerprint of the draft it showed, so a newer draft for the same session is never
+// accepted or rejected unseen, and ticked unverified items can't point at different ones.
+export const proposalFingerprint = (p) => createHash("sha256").update(proposalKey(p, p.summary)).digest("hex").slice(0, 16)
 
 export async function acceptProposal(p, opts = {}) {
   p = { ...p, file: proposalFile(p) }
   const resuming = p.file.endsWith(".accepting")
   const claimed = resuming ? p.file : `${p.file}.accepting`
   if (!resuming) {
-    // Reserve the claim name exclusively, then move the proposal onto it in one rename.
-    // Exactly one accept gets the reservation, and the rename moves whatever is published
-    // at that moment, so nothing published meanwhile is deleted unseen.
-    try { await (await fs.open(claimed, "wx")).close() } catch (e) {
-      if (e.code === "EEXIST") throw new Error("This proposal is already being accepted; if that was interrupted, accept it again from `ws review`")
-      throw e
-    }
-    try { await fs.rename(p.file, claimed) } catch (e) {
-      await fs.rm(claimed, { force: true })
-      if (e.code === "ENOENT") throw new Error("This proposal was already accepted or rejected")
-      throw e
-    }
+    // Claimed under the draft's own lock, which publishing and rejecting take too: the draft
+    // is compared with what the reviewer approved and moved onto the claim name in one step,
+    // so a newer draft is never applied, moved or overwritten unseen. Of two accepts, the
+    // second finds the draft gone.
+    await store.withLock(p.file, async () => {
+      let cur
+      try { cur = parseMd(store.normalizeEol(await fs.readFile(/* turbopackIgnore: true */ p.file, "utf-8"))) } catch (e) {
+        if (e.code === "ENOENT") throw new Error("This proposal was already accepted or rejected")
+        throw e
+      }
+      if (proposalKey(cur.data, cur.content) !== proposalKey(p, p.summary)) throw new Error("The proposal changed since you opened it; review it again")
+      // An earlier accept of this session's draft that was interrupted must be finished first.
+      // (An empty claim is one that ws 0.2.1 and earlier reserved before moving the draft:
+      // nothing was applied from it, so it is cleared.)
+      const prior = await fs.readFile(claimed, "utf-8").catch((e) => (e.code === "ENOENT" ? null : Promise.reject(e)))
+      if (prior !== null && prior.trim()) throw new Error("An earlier accept for this session was interrupted; accept that one again from `ws review` first")
+      if (prior !== null) await fs.rm(claimed, { force: true })
+      await fs.rename(p.file, claimed)
+    })
   }
   return store.withLock(claimed, async () => {
     let cur
@@ -716,12 +787,10 @@ export async function acceptProposal(p, opts = {}) {
       if (e.code === "ENOENT") throw new Error("This proposal was already accepted")
       throw e
     }
-    // The reviewer approved a specific proposal; if what's on disk differs in any field
-    // that would be applied (a newer draft for the same session), stop and show it again.
-    if (!resuming && proposalKey(cur.data, cur.content) !== proposalKey(p, p.summary)) {
-      await fs.rename(claimed, p.file).catch(() => {})
-      throw new Error("The proposal changed since you opened it; review it again")
-    }
+    // Checked again under the claim's own lock, resumed or not: the claim name is reused per
+    // session, so a delayed retry could otherwise apply a later draft's claim with the
+    // options and confirmations chosen for this one. Nothing is moved on a mismatch.
+    if (proposalKey(cur.data, cur.content) !== proposalKey(p, p.summary)) throw new Error("The proposal changed since you opened it; review it again")
     const done = new Set(cur.data.applied_steps || [])
     const step = async (key, fn) => {
       if (done.has(key)) return
@@ -741,6 +810,19 @@ export async function acceptProposal(p, opts = {}) {
   })
 }
 
+// A step made moot by a change since the draft (the item was closed, removed or reworded
+// meanwhile; the session's log is gone) is reported as skipped and counts as done. store
+// marks those errors with `conflict`. Anything else (a file ws can't parse, a lock timeout,
+// a full disk) stops the accept with the proposal kept, so accepting again retries that
+// step instead of losing it.
+function skipIfMoot(applied, label, e) {
+  if (e?.conflict !== true) throw e
+  applied.skipped.push(`${label}: ${e.message}`)
+}
+
+// Drafts record the text of each item they close; older drafts don't, and close by ID alone.
+const expectText = (c) => (typeof c.item === "string" ? { [c.id]: c.item } : {})
+
 async function applyProposal(p, { close = true, add = true, summary = true, unverified = [], decide = true, confirmDecisions = [] } = {}, step) {
   const applied = { closed: [], added: [], decided: [], skipped: [] }
   // Verified decisions apply with `decide`; unverified ones only when confirmed by index.
@@ -750,7 +832,7 @@ async function applyProposal(p, { close = true, add = true, summary = true, unve
       try {
         const r = await store.decide(p.ws, d.text, { why: d.why || undefined, rejected: d.rejected, evidence: d.quote ? `"${d.quote}"` : undefined, session: p.session })
         applied.decided.push(r.decision.id)
-      } catch (e) { applied.skipped.push(`decision: ${e.message}`) }
+      } catch (e) { skipIfMoot(applied, "decision", e) }
     })
   }
   // Unverified closes apply only when the reviewer ticks them, by ID.
@@ -758,7 +840,7 @@ async function applyProposal(p, { close = true, add = true, summary = true, unve
     const u = (p.unverified || []).find((x) => x.id.toUpperCase() === String(id).toUpperCase())
     if (!u) continue
     await step(`close:${u.id.toUpperCase()}`, async () => {
-      try { applied.closed.push((await store.closeItem(p.ws, u.id, { session: p.session, note: `reviewer confirmed: ${u.evidence}` })).id) } catch (e) { applied.skipped.push(`${u.id}: ${e.message}`) }
+      try { applied.closed.push((await store.closeItem(p.ws, u.id, { session: p.session, note: `reviewer confirmed: ${u.evidence}`, expect: expectText(u) })).id) } catch (e) { skipIfMoot(applied, u.id, e) }
     })
   }
   if (add) {
@@ -769,7 +851,7 @@ async function applyProposal(p, { close = true, add = true, summary = true, unve
   if (close) {
     for (const c of p.close || []) {
       await step(`close:${c.id.toUpperCase()}`, async () => {
-        try { applied.closed.push((await store.closeItem(p.ws, c.id, { session: p.session, note: c.evidence })).id) } catch (e) { applied.skipped.push(`${c.id}: ${e.message}`) }
+        try { applied.closed.push((await store.closeItem(p.ws, c.id, { session: p.session, note: c.evidence, expect: expectText(c) })).id) } catch (e) { skipIfMoot(applied, c.id, e) }
       })
     }
   }
@@ -777,16 +859,20 @@ async function applyProposal(p, { close = true, add = true, summary = true, unve
     await step("summary", async () => {
       // Same lock as session capture, so a hook rewriting this log can't race us.
       await store.withLock(path.join(path.dirname(p.log), ".capture"), async () => {
-        try {
-          const { data, content } = parseMd(store.normalizeEol(await fs.readFile(p.log, "utf-8")))
-          // Never replace a summary someone wrote; only fill an "(auto)" placeholder.
-          if (content.trim() && !/^\(auto\)/.test(content.trim())) { applied.skipped.push("summary: session already has notes"); return }
-          data.source = `${data.source || "hook"}+model`
-          data.summary_model = p.model
-          if (applied.closed.length) data.closed = applied.closed
-          if (applied.added.length) data.added = applied.added
-          await store.writeFileAtomic(p.log, matter.stringify(`\n${p.summary}\n`, data))
-        } catch (e) { applied.skipped.push(`log: ${e.message}`) }
+        let text
+        try { text = await fs.readFile(p.log, "utf-8") } catch (e) {
+          if (e.code !== "ENOENT") throw e
+          applied.skipped.push("summary: the session's log file is gone")
+          return
+        }
+        const { data, content } = parseMd(store.normalizeEol(text))
+        // Never replace a summary someone wrote; only fill an "(auto)" placeholder.
+        if (content.trim() && !/^\(auto\)/.test(content.trim())) { applied.skipped.push("summary: session already has notes"); return }
+        data.source = `${data.source || "hook"}+model`
+        if (p.model) data.summary_model = String(p.model) // YAML can't hold undefined
+        if (applied.closed.length) data.closed = applied.closed
+        if (applied.added.length) data.added = applied.added
+        await store.writeFileAtomic(p.log, matter.stringify(`\n${p.summary}\n`, data))
       })
     })
   }
@@ -801,6 +887,19 @@ function proposalFile(p) {
   return path.join(PROPOSALS_DIR, dir, name)
 }
 
-export async function rejectProposal(p) {
-  await fs.rm(proposalFile(p), { force: true })
+// Deletes the draft only if it is still the one the reviewer saw (`fingerprint`, from
+// proposalFingerprint of the listing). Checked and removed under the draft's lock, the one
+// publishing and accepting take, so a newer draft is never deleted unseen.
+export async function rejectProposal(p, { fingerprint = proposalFingerprint(p) } = {}) {
+  const file = proposalFile(p)
+  await store.withLock(file, async () => {
+    let text
+    try { text = await fs.readFile(file, "utf-8") } catch (e) {
+      if (e.code === "ENOENT") throw new Error("This proposal was already accepted or rejected")
+      throw e
+    }
+    const { data, content } = parseMd(store.normalizeEol(text))
+    if (proposalFingerprint({ ...data, summary: content.trim() }) !== fingerprint) throw new Error("The proposal changed since you opened it; review it again")
+    await fs.rm(file)
+  })
 }

@@ -6,7 +6,7 @@
 npm --prefix ws test
 ```
 
-Uses `node:test`. Each test file points `WS_ROOT` at a fresh temp directory, so real data is never touched. The summarizer tests use a fake OpenAI-compatible server. The MCP test talks to `ws/mcp/server.mjs` over stdio. The setup tests use a fake `HOME`.
+Uses `node:test`. Each test file points `WS_ROOT` at a fresh temp directory, so real data is never touched. `test/env.mjs` is loaded before every test file: it drops `WS_LLM_URL`/`WS_LLM_API_KEY`/`WS_LLM_MODEL` and other `WS_*` overrides from your shell, turns off background drains, and points `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `GEMINI_CLI_HOME` at empty folders, so no test reaches your model endpoint or reads your real sessions. Run single files the same way: `node --import ./test/env.mjs --test test/<file>.test.mjs` (from `ws/`). The summarizer tests use a fake OpenAI-compatible server. The MCP test talks to `ws/mcp/server.mjs` over stdio. The setup tests use a fake `HOME`.
 
 Notable suites:
 

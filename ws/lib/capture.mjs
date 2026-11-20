@@ -348,17 +348,53 @@ export async function listInbox({ broken } = {}) {
   return out
 }
 
+// Assigning works under the row's lock: of two assigns at once (a double click, the board
+// and the CLI), the second finds the row gone and is told so. The row is removed only after
+// the session is logged, so a crash in between leaves it in the inbox rather than losing it.
+// Assigning that same row again finds the log it wrote (same session, same end time) and
+// finishes from there instead of logging it twice. A later inbox row for the same session
+// (it was resumed and ended again) is a new log, as before.
 export async function assignInbox(entry, wsId, summary) {
   await store.getWorkstream(wsId)
   const { file, suggestions, ...meta } = entry
-  const logFile = await store.appendLog(wsId, { ...meta, source: summary ? "inbox+manual" : "hook", summary: summary || `(auto) ${meta.title || "untitled session"}` })
-  await fs.rm(file)
-  if (!summary) await queueSummary({ ws: wsId, session: meta.session, tool: meta.tool, transcript: meta.transcript, log: logFile })
-  return logFile
+  const isAuto = (text) => /^\(auto\)/.test(String(text || "").trim())
+  return store.withLock(file, async () => {
+    try { await fs.access(file) } catch { throw new Error("This inbox row was already handled") }
+    const sameEnd = (l) => meta.ended != null && l.ended != null && Date.parse(l.ended) === Date.parse(meta.ended)
+    const earlier = meta.session ? (await store.getWorkstream(wsId)).logs.find((l) => l.session === meta.session && sameEnd(l)) : null
+    let logFile, placeholder
+    if (!earlier) {
+      logFile = await store.appendLog(wsId, { ...meta, source: summary ? "inbox+manual" : "hook", summary: summary || `(auto) ${meta.title || "untitled session"}` })
+      placeholder = !summary
+    } else {
+      logFile = earlier.file
+      // Under the log's capture lock (the one session capture and accepting a draft take),
+      // judged from the log as it is now: a summary given now fills only a placeholder, and
+      // a model summary landing meanwhile can't overwrite it or be overwritten.
+      placeholder = await store.withLock(path.join(path.dirname(logFile), ".capture"), async () => {
+        const { data, content } = parseMd(store.normalizeEol(await fs.readFile(logFile, "utf-8")))
+        if (!isAuto(content)) return false
+        if (!summary) return true
+        await writeLogFile(logFile, { ...data, source: "inbox+manual" }, summary)
+        return false
+      })
+    }
+    // Queued before the row is removed, so an interruption anywhere leaves the row to retry.
+    // Re-queueing is harmless (one queue file per session).
+    if (placeholder) await queueSummary({ ws: wsId, session: meta.session, tool: meta.tool, transcript: meta.transcript, log: logFile })
+    await fs.rm(file, { force: true })
+    return logFile
+  })
 }
 
 export async function ignoreInbox(entry, { cwd = false } = {}) {
-  await fs.rm(entry.file)
+  // The same lock as assigning, so an ignore can't remove a row an assign is logging.
+  await store.withLock(entry.file, async () => {
+    try { await fs.rm(entry.file) } catch (e) {
+      if (e.code === "ENOENT") throw new Error("This inbox row was already handled")
+      throw e
+    }
+  })
   if (cwd && entry.cwd) await fs.appendFile(IGNORE_FILE, `${entry.cwd}\n`)
 }
 

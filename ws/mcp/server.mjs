@@ -22,7 +22,7 @@ if (platformProblem() || store.ROOT_PROBLEM) {
   process.exit(1)
 }
 
-const server = new McpServer({ name: "ws", version: "0.2.0" })
+const server = new McpServer({ name: "ws", version: "0.2.1" })
 
 server.registerTool(
   "ws_list",

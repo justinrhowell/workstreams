@@ -356,7 +356,7 @@ test("F01 (round 4): a resumed accept refuses a claim that now holds a different
   assert.ok(!(await sum.listProposals("site")).some((x) => x.session === "res-1"))
 })
 
-test("F21: an assign retry never overwrites notes that land on the log while it waits", async () => {
+test("F21: an assign retry never overwrites notes that land on the log while it waits, and never drops the user's", async () => {
   const t = await transcript("f21")
   await fs.writeFile(path.join(cap.INBOX_DIR, "2026-11-20_claude_r6.md"), matter.stringify("\nF\n", { session: "inbox-row-6", tool: "claude", title: "F", ended: "2026-11-20T12:00:00Z", transcript: t }))
   const row = (await cap.listInbox()).find((r) => r.session === "inbox-row-6")
@@ -371,8 +371,14 @@ test("F21: an assign retry never overwrites notes that land on the log while it 
     assert.match(content, /\(auto\) F/, "the retry waits for the capture lock before touching the log")
     await fs.writeFile(log, matter.stringify("\nModel summary.\n", { ...data, source: "hook+model" }))
   })
-  assert.equal(await pending, log)
+  // The user's notes differ from what landed: the log is untouched, the row stays, and the
+  // error says where to put them.
+  await assert.rejects(pending, (e) => e.conflict === true && /already has notes.*inbox row was kept/.test(e.message))
   assert.match(await fs.readFile(log, "utf-8"), /Model summary\./)
+  assert.equal((await cap.listInbox()).filter((x) => x.session === "inbox-row-6").length, 1)
+  // Assigning again without notes (or with the same notes) completes and removes the row.
+  const again = (await cap.listInbox()).find((r) => r.session === "inbox-row-6")
+  assert.equal(await cap.assignInbox(again, "site"), log)
   assert.equal((await cap.listInbox()).filter((x) => x.session === "inbox-row-6").length, 0)
 })
 

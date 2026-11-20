@@ -370,10 +370,19 @@ export async function assignInbox(entry, wsId, summary) {
       logFile = earlier.file
       // Under the log's capture lock (the one session capture and accepting a draft take),
       // judged from the log as it is now: a summary given now fills only a placeholder, and
-      // a model summary landing meanwhile can't overwrite it or be overwritten.
+      // a model summary landing meanwhile can't overwrite it or be overwritten. If the log
+      // already has different notes, the row stays and the caller is told, so the user's
+      // notes are never dropped silently.
       placeholder = await store.withLock(path.join(path.dirname(logFile), ".capture"), async () => {
         const { data, content } = parseMd(store.normalizeEol(await fs.readFile(logFile, "utf-8")))
-        if (!isAuto(content)) return false
+        if (!isAuto(content)) {
+          if (summary && content.trim() !== String(summary).trim()) {
+            const e = new Error(`This session's log already has notes, so yours weren't saved and the inbox row was kept. Add them to ${store.tildify(logFile)} by hand, then ignore the row.`)
+            e.conflict = true
+            throw e
+          }
+          return false
+        }
         if (!summary) return true
         await writeLogFile(logFile, { ...data, source: "inbox+manual" }, summary)
         return false

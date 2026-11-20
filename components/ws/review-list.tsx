@@ -1,36 +1,63 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { api, type Proposal } from "./api"
+import { LoadError, errorText } from "./load-error"
 
-export function ReviewList({ onChange, onOpen }: { onChange: () => void; onOpen: (id: string) => void }) {
+// `version` changes whenever the board's poll succeeds, so the list follows the same refresh as
+// the "Review (n)" count. Rows are kept across reloads (and across a failed one), so ticked boxes
+// survive and focus can return to the workstream link that opened the panel.
+export function ReviewList({ version, onChange, onOpen }: { version: number; onChange: () => void; onOpen: (id: string) => void }) {
   const [rows, setRows] = useState<Proposal[] | null>(null)
-  const load = useCallback(async () => setRows(await api.review().catch(() => [])), [])
+  const [error, setError] = useState<string | null>(null)
+  const seq = useRef(0) // only the newest request may set state
+  const load = useCallback(async () => {
+    const n = ++seq.current
+    try {
+      const data = await api.review()
+      if (n === seq.current) { setRows(data); setError(null) }
+    } catch (e) {
+      if (n === seq.current) setError(errorText(e))
+    }
+  }, [])
   useEffect(() => {
-    const t = setTimeout(load, 0) // fetch after mount, outside the effect body
+    const t = setTimeout(load, 0) // fetch after mount and on each board refresh, outside the effect body
     return () => clearTimeout(t)
-  }, [load])
+  }, [load, version])
 
-  if (!rows) return <p className="text-sm text-muted-foreground">Loading…</p>
+  const failed = error && <LoadError what="drafts to review" error={error} onRetry={load} />
+  if (!rows) return failed || <p role="status" className="text-sm text-muted-foreground">Loading…</p>
   if (!rows.length) {
     return (
-      <p className="text-sm text-muted-foreground">
-        Nothing to review. When a linked session ends without notes, the local model drafts a summary and item changes here. Nothing is applied until you accept it.
-      </p>
+      <>
+        {failed}
+        {!error && (
+          <p className="text-sm text-muted-foreground">
+            Nothing to review. When a linked session ends without notes, the local model drafts a summary and item changes here. Nothing is applied until you accept it.
+          </p>
+        )}
+      </>
     )
   }
   return (
-    <div className="max-w-3xl space-y-3">
-      {rows.map((p) => (
-        <div key={p.ws + p.session}>
-          <button className="mb-1 text-sm font-medium underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" onClick={() => onOpen(p.ws)}>{p.ws}</button>
-          <ProposalCard p={p} onDone={() => { load(); onChange() }} />
-        </div>
-      ))}
-    </div>
+    <>
+      {failed}
+      <div className="max-w-3xl space-y-3">
+        {rows.map((p) => (
+          <div key={p.ws + p.session}>
+            <button className="mb-1 text-sm font-medium underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" onClick={() => onOpen(p.ws)}>{p.ws}</button>
+            <ProposalCard p={p} onDone={() => { load(); onChange() }} />
+          </div>
+        ))}
+      </div>
+    </>
   )
 }
 
@@ -49,7 +76,7 @@ export function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void })
       toast.success(action === "accept" ? "Applied" : "Rejected")
       onDone()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e))
+      toast.error(errorText(e))
     } finally {
       setBusy(false)
     }
@@ -116,7 +143,24 @@ export function ProposalCard({ p, onDone }: { p: Proposal; onDone: () => void })
       ) : null)}
       <div className="mt-3 flex gap-2">
         <Button size="sm" disabled={busy} aria-label={`Accept draft for ${p.ws}`} onClick={() => act("accept")}>Accept</Button>
-        <Button size="sm" variant="ghost" disabled={busy} aria-label={`Reject draft for ${p.ws}`} onClick={() => act("reject")}>Reject</Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button size="sm" variant="ghost" disabled={busy} aria-label={`Reject draft for ${p.ws}`}>Reject…</Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Reject this draft for {p.ws}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Deletes the drafted summary, item changes and decisions for session {p.session.slice(0, 8)}. Nothing is applied to the
+                workstream, and the session stays in its log without notes. This can&apos;t be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={() => act("reject")}>Reject draft</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </div>
   )

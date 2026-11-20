@@ -1,18 +1,32 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api, type InboxRow, type Workstream } from "./api"
+import { LoadError, errorText } from "./load-error"
 
-export function InboxList({ workstreams, onChange }: { workstreams: Workstream[]; onChange: () => void }) {
+// `version` changes whenever the board's poll succeeds, so the list follows the same 10s refresh
+// as the tab counts. Rows are kept across reloads (and across a failed one), so a background
+// refresh doesn't reset a picked workstream or move focus.
+export function InboxList({ workstreams, version, onChange }: { workstreams: Workstream[]; version: number; onChange: () => void }) {
   const [rows, setRows] = useState<InboxRow[] | null>(null)
-  const load = useCallback(async () => setRows(await api.inbox().catch(() => [])), [])
+  const [error, setError] = useState<string | null>(null)
+  const seq = useRef(0) // only the newest request may set state
+  const load = useCallback(async () => {
+    const n = ++seq.current
+    try {
+      const data = await api.inbox()
+      if (n === seq.current) { setRows(data); setError(null) }
+    } catch (e) {
+      if (n === seq.current) setError(errorText(e))
+    }
+  }, [])
   useEffect(() => {
-    const t = setTimeout(load, 0) // fetch after mount, outside the effect body
+    const t = setTimeout(load, 0) // fetch after mount and on each board refresh, outside the effect body
     return () => clearTimeout(t)
-  }, [load])
+  }, [load, version])
 
   async function act(body: Record<string, unknown>, done: string) {
     try {
@@ -21,18 +35,29 @@ export function InboxList({ workstreams, onChange }: { workstreams: Workstream[]
       await load()
       onChange()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e))
+      toast.error(errorText(e))
     }
   }
 
-  if (!rows) return <p className="text-sm text-muted-foreground">Loading…</p>
-  if (!rows.length) return <p className="text-sm text-muted-foreground">Inbox empty. Sessions that end outside any workstream folder show up here.</p>
+  const failed = error && <LoadError what="the inbox" error={error} onRetry={load} />
+  if (!rows) return failed || <p role="status" className="text-sm text-muted-foreground">Loading…</p>
+  if (!rows.length) {
+    return (
+      <>
+        {failed}
+        {!error && <p className="text-sm text-muted-foreground">Inbox empty. Sessions that end outside any workstream folder show up here.</p>}
+      </>
+    )
+  }
 
   const live = workstreams.filter((w) => w.status !== "done")
   return (
-    <ul className="max-w-4xl divide-y rounded-md border">
-      {rows.map((r) => <Row key={r.session} r={r} live={live} act={act} />)}
-    </ul>
+    <>
+      {failed}
+      <ul className="max-w-4xl divide-y rounded-md border">
+        {rows.map((r) => <Row key={r.session} r={r} live={live} act={act} />)}
+      </ul>
+    </>
   )
 }
 

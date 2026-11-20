@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { api, ago, type Detail } from "./api"
 import { ProposalCard } from "./review-list"
+import { LoadError, errorText } from "./load-error"
 
 type Props = { id: string | null; onClose: () => void; onCloseFocus?: () => void; onChange: () => void; onError: (m: string) => void }
 
@@ -23,23 +24,35 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
   const [waitingOn, setWaitingOn] = useState("")
   const [tool, setTool] = useState<"claude" | "codex">("claude")
   const [busy, setBusy] = useState(false)
+  // A failed detail read (e.g. the workstream was deleted from the CLI) is shown in the panel
+  // with Retry, instead of a toast and a "Loading…" that never ends.
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const current = useRef(id) // ignore a response for a workstream that's no longer open
+  useEffect(() => { current.current = id }, [id])
 
   const load = useCallback(async () => {
     if (!id) return
     try {
       const data = await api.detail(id)
+      if (current.current !== id) return
       setD(data)
       setWaitingOn(data.waiting_on)
+      setLoadError(null)
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e))
+      if (current.current === id) setLoadError(errorText(e))
     }
-  }, [id, onError])
+  }, [id])
 
-  // New workstream: clear the old detail, then fetch (after mount, outside the effect body).
+  // New workstream: clear the old detail and error, then fetch (after mount, outside the effect body).
   useEffect(() => {
-    const t = setTimeout(() => { setD(null); load() }, 0)
+    const t = setTimeout(() => { setD(null); setLoadError(null); load() }, 0)
     return () => clearTimeout(t)
   }, [load])
+
+  function retry() {
+    setLoadError(null)
+    load()
+  }
 
   // Resolves true when the change was saved, so callers only clear input or close on success.
   async function act(body: Record<string, unknown>, done?: string): Promise<boolean> {
@@ -48,11 +61,12 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
     try {
       await api.act(id, body)
       if (done) toast.success(done)
-      await load()
+      // A deleted workstream can't be read back, and the panel closes right after anyway.
+      if (body.action !== "delete") await load()
       onChange()
       return true
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e))
+      onError(errorText(e))
       return false
     } finally {
       setBusy(false)
@@ -77,12 +91,15 @@ export function WorkstreamSheet({ id, onClose, onCloseFocus, onChange, onError }
       >
         {!d ? (
           <>
-            <SheetTitle className="sr-only">Workstream</SheetTitle>
-            <SheetDescription className="sr-only">Loading workstream details</SheetDescription>
-            <p role="status" className="text-sm text-muted-foreground">Loading…</p>
+            <SheetTitle className={loadError ? "mb-3 pr-6" : "sr-only"}>{loadError ? id : "Workstream"}</SheetTitle>
+            <SheetDescription className="sr-only">{loadError ? "Workstream details couldn't be loaded" : "Loading workstream details"}</SheetDescription>
+            {loadError
+              ? <LoadError what="this workstream" error={loadError} onRetry={retry} />
+              : <p role="status" className="text-sm text-muted-foreground">Loading…</p>}
           </>
         ) : (
           <div className="space-y-6">
+            {loadError && <LoadError what="the latest changes" error={loadError} onRetry={retry} />}
             <SheetHeader>
               <SheetTitle className="pr-6 leading-snug">{d.title}</SheetTitle>
               <SheetDescription>

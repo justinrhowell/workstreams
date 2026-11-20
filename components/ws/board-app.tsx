@@ -11,6 +11,7 @@ import { SearchResults } from "./search-results"
 import { WorkstreamSheet } from "./workstream-sheet"
 import { InboxList } from "./inbox-list"
 import { ReviewList } from "./review-list"
+import { LoadError, errorText } from "./load-error"
 
 const COLUMNS: { status: string; label: string; hint: string }[] = [
   { status: "active", label: "Active", hint: "next move is yours" },
@@ -23,6 +24,9 @@ export function BoardApp() {
   const [board, setBoard] = useState<Board | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // When the board data was last read successfully. The inbox and review lists reload when it
+  // changes, so they stay in step with the tab counts.
+  const [loadedAt, setLoadedAt] = useState(0)
   const [showArchived, setShowArchived] = useState(false)
   const [trash, setTrash] = useState<TrashRow[]>([])
   const [tab, setTab] = useState("board")
@@ -43,9 +47,17 @@ export function BoardApp() {
       setBoard(b)
       setTrash(b.counts.trash ? await api.trash() : [])
       setError(null)
+      setLoadedAt(Date.now())
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorText(e))
     }
+  }, [])
+  // Put focus back where the panel was opened from; if that element is gone (its row was
+  // accepted or rejected meanwhile), fall back to the main region rather than <body>.
+  const restoreFocus = useCallback(() => {
+    const el = opener.current
+    if (el?.isConnected) el.focus()
+    else document.getElementById("main")?.focus()
   }, [])
 
   // Sessions end in other windows; keep the board current without a reload.
@@ -90,7 +102,7 @@ export function BoardApp() {
     return () => document.removeEventListener("keydown", onKey)
   }, [])
 
-  if (error && !board) return <p role="alert" className="p-8 text-sm text-red-600">Couldn&apos;t read workstreams: {error}</p>
+  if (error && !board) return <div className="p-8"><LoadError what="workstreams" error={error} onRetry={refresh} /></div>
   if (!board) return <p role="status" className="p-8 text-sm text-muted-foreground">Loading…</p>
 
   // A result for an older query is ignored until the new one arrives.
@@ -105,7 +117,7 @@ export function BoardApp() {
       toast.success("Restored")
       refresh()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e))
+      toast.error(errorText(e))
     }
   }
 
@@ -118,6 +130,16 @@ export function BoardApp() {
           {board.counts.queued ? ` · ${board.counts.queued} summaries queued` : ""}
         </p>
       </div>
+
+      {/* A failed background refresh doesn't hide the board; it says the data may be out of date. */}
+      {error && (
+        <div role="status" className="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-amber-300 p-3 text-sm text-amber-800 dark:text-amber-300">
+          <span className="min-w-0 flex-1">
+            Couldn&apos;t refresh: {error}. Showing what was read at {new Date(loadedAt).toLocaleTimeString()}; retrying every 10 seconds.
+          </span>
+          <Button size="sm" variant="outline" onClick={refresh}>Retry now</Button>
+        </div>
+      )}
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
@@ -214,18 +236,18 @@ export function BoardApp() {
         </TabsContent>
 
         <TabsContent value="inbox" className="mt-4">
-          <InboxList workstreams={board.workstreams} onChange={refresh} />
+          <InboxList workstreams={board.workstreams} version={loadedAt} onChange={refresh} />
         </TabsContent>
 
         <TabsContent value="review" className="mt-4">
-          <ReviewList onChange={refresh} onOpen={setSelected} />
+          <ReviewList version={loadedAt} onChange={refresh} onOpen={open} />
         </TabsContent>
       </Tabs>
 
       <WorkstreamSheet
         id={selected}
         onClose={() => setSelected(null)}
-        onCloseFocus={() => opener.current?.focus()}
+        onCloseFocus={restoreFocus}
         onChange={() => {
           refresh()
         }}

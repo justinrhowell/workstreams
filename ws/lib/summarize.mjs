@@ -174,42 +174,61 @@ const Q = String.raw`(?:\\?["'])?`
 const VAL = String.raw`[^\s"'\\&,;|]`
 // A credential value: quoted (plain or JSON-escaped), redacted through its closing quote
 // even if it holds spaces or punctuation; or unquoted, up to the next delimiter.
-const VALUE = String.raw`(\\"(?:(?!\\").)*\\"|"(?:[^"\\\n]|\\.)*"|'[^'\n]*'|${VAL}+)`
+const VALUE = String.raw`(\\"(?:(?!\\").){0,512}\\"|"(?:[^"\\\n]|\\.){0,512}"|'[^'\n]{0,512}'|${VAL}{1,512})`
 // Replacer for a (prefix)(value) match: keeps the prefix and any quotes, and redacts the
 // value when `ok(contents, prefix)` accepts it. A double-quoted value may hold \" escapes.
 const mask = (ok = () => true) => (m, pre, v) => {
   const q = v.startsWith('\\"') ? '\\"' : /^["']/.test(v) ? v[0] : ""
   const inner = q ? v.slice(q.length, -q.length) : v
-  if (inner && ok(inner, pre)) return `${pre}${q}[redacted]${q}`
+  if (inner && ok(inner, pre, !!q)) return `${pre}${q}[redacted]${q}`
   // Not a credential itself, but it may hold one (token: "notes password=abc12345").
   return q && inner ? `${pre}${q}${redact(inner)}${q}` : m
 }
+// Every repetition is bounded ({0,40}, {0,200}…), so a long run of key-like text costs
+// linear time, not quadratic. Text is also capped per turn before it gets here (redactClip).
+const KEY_SUFFIX = String.raw`[A-Za-z0-9_-]{0,40}`
+const PEM = String.raw`-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----`
 const SECRET_PATTERNS = [
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted key]"],
-  [/\b(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,})/g, "[redacted]"],
-  [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, "[redacted]"],
-  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, "[redacted]"],
+  // A complete key block; or, with no END in sight (clipped, pasted partially), the header
+  // plus the base64 and armor-header lines that follow it, and nothing after.
+  [new RegExp(String.raw`${PEM}(?:[\s\S]{0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----|(?:\s+(?:[A-Za-z0-9+/=]{16,8192}|[A-Za-z-]{1,40}: [^\n]{0,200}))*)`, "g"), "[redacted key]"],
+  [/\b(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,512})/g, "[redacted]"],
+  [/\b(gh[pousr]_[A-Za-z0-9]{20,512}|github_pat_[A-Za-z0-9_]{20,512})/g, "[redacted]"],
+  [/\b(?:xox[abprs]|xapp)-[A-Za-z0-9-]{10,512}/g, "[redacted]"], // Slack tokens
+  [/\bhooks\.slack\.com\/services\/[A-Za-z0-9/]{10,512}/g, "hooks.slack.com/services/[redacted]"],
   [/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted]"],
-  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}/g, "[redacted]"], // Stripe secret / restricted keys
+  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,512}/g, "[redacted]"], // Stripe secret / restricted keys
   [/\bAIza[0-9A-Za-z_-]{35}/g, "[redacted]"], // Google API keys
-  [/\bglpat-[A-Za-z0-9_-]{20,}/g, "[redacted]"], // GitLab
+  [/\bglpat-[A-Za-z0-9_-]{20,512}/g, "[redacted]"], // GitLab
   [/\bnpm_[A-Za-z0-9]{36}\b/g, "[redacted]"], // npm
-  [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, "[redacted jwt]"],
-  [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [redacted]"],
+  [/\bhf_[A-Za-z0-9]{30,512}/g, "[redacted]"], // Hugging Face
+  [/\bSG\.[A-Za-z0-9_-]{16,512}\.[A-Za-z0-9_-]{16,512}/g, "[redacted]"], // SendGrid
+  [/([?&]sig=)[A-Za-z0-9%+/=]{10,512}/g, "$1[redacted]"], // Azure SAS signatures
+  [/\beyJ[A-Za-z0-9_-]{10,4096}\.[A-Za-z0-9_-]{10,4096}\.[A-Za-z0-9_-]{5,4096}/g, "[redacted jwt]"],
+  // Case-insensitive (headers are often lowercase), but the value must look like a token
+  // (a digit, or mixed case), so prose like "basic authentication" is left alone.
+  [/\b(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{12,512})/gi, (m, kind, v) => (/\d/.test(v) || (/[a-z]/.test(v) && /[A-Z]/.test(v)) ? `${kind} [redacted]` : m)],
   // Shell-style NAME=value where the name says it is a credential (AWS_SECRET_ACCESS_KEY,
-  // DB_PASSWORD, GITHUB_TOKEN): redacted whatever the value looks like, however short.
-  [new RegExp(String.raw`\b([A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*=)${VALUE}`, "g"), mask()],
-  // key=value / key: value in any case, but only when the value looks like a credential
-  // (8+ chars with both letters and digits), so prose like "token: refresh bug" survives.
-  // A quoted value with spaces counts only after a password-type key, so quoted prose
-  // ("token: \"upgrade to v2 next week\"") is left alone.
-  [new RegExp(String.raw`((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)[A-Za-z0-9_-]*${Q}\s*[:=]\s*)${VALUE}`, "gi"),
-    mask((v, pre) => v.length >= 8 && /\d/.test(v) && /[A-Za-z]/.test(v) && (!/\s/.test(v) || /pass|pwd|secret/i.test(pre)))],
+  // DB_PASS, MYSQL_PWD, GITHUB_TOKEN, ENCRYPTION_KEY): redacted whatever the value looks
+  // like, however short. MAX_TOKENS / TOKENIZER_* / BYPASS_* are not credentials.
+  [new RegExp(String.raw`\b([A-Z0-9_]{0,40}(?:SECRET|PASSWORD|PASSWD|(?<![A-Z0-9])PASS(?![A-Z])|(?<![A-Z0-9])PWD(?![A-Z])|TOKEN(?![SI])|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]{0,40}=|[A-Z0-9_]{0,40}_KEY=)${VALUE}`, "g"), mask()],
+  // key=value / key: value in any case. After a password-type key a quoted value counts,
+  // and an unquoted one of 6+ chars with a digit, capital or symbol, or of 12+ chars
+  // ("password: handling failure" is prose); after token/api-key-type keys only values that
+  // look like credentials (8+ chars with letters and digits), so prose like
+  // "token: refresh bug" survives. Quoted values with spaces count only after password keys.
+  [new RegExp(String.raw`((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd|pwd|token)${KEY_SUFFIX}${Q}\s*[:=]\s*)${VALUE}`, "gi"),
+    mask((v, pre, quoted) => /pass|pwd|secret/i.test(pre)
+      ? quoted || (v.length >= 6 && (/[^a-z]/.test(v) || v.length >= 12))
+      : v.length >= 8 && /\d/.test(v) && /[A-Za-z]/.test(v) && !/\s/.test(v))],
   // Credentials passed as command-line flags.
-  [new RegExp(String.raw`((?:^|\s)--password[= ])${VALUE}`, "g"), mask()],
-  [new RegExp(String.raw`((?:^|\s)(?:-u|--user)\s+${Q}[^\s:"'\\]+:)${VAL}+`, "g"), "$1[redacted]"],
-  [new RegExp(String.raw`(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]*?\s-p)${VALUE}`, "g"), mask()],
-  [/(\/\/)[^/\s:@]+:[^/\s@]+@/g, "$1[redacted]@"],
+  [new RegExp(String.raw`((?:^|\s)--(?:password|passwd|api-key|apikey|token|secret)[= ])${VALUE}`, "g"), mask()],
+  [new RegExp(String.raw`((?:^|\s)(?:-u ?|--user[= ])${Q}[^\s:"'\\]{1,200}:)${VAL}{1,512}`, "g"), "$1[redacted]"],
+  [new RegExp(String.raw`(\b(?:mysql|mysqldump|mysqladmin|mariadb|sshpass|docker\s+login|podman\s+login)\b[^\n|;&]{0,200}?\s-p ?)${VALUE}`, "g"), mask()],
+  [new RegExp(String.raw`(\bmachine\s+\S{1,200}\s+login\s+\S{1,200}\s+password\s+)${VALUE}`, "g"), mask()], // .netrc
+  // user:password@host in URLs; the user may be empty (redis://:pw@host) and the password
+  // may hold @. A password containing "/" isn't caught (it can't be told from a path).
+  [/(\/\/)[^\s/@:]{0,200}:[^\s/]{0,200}@/g, "$1[redacted]@"],
 ]
 export function redact(text) {
   let out = String(text)
@@ -233,10 +252,23 @@ function codexCommand(raw) {
   return String(raw)
 }
 
+// Redaction runs on a prefix of each text, a few times longer than what is kept, cut at
+// whitespace so no secret is split at the edge. Pastes of megabytes cost no more than this.
+function redactClip(text, n) {
+  let t = String(text)
+  const max = Math.max(n * 4, 2000)
+  if (t.length > max) {
+    const cut = t.slice(0, max)
+    const ws = cut.search(/\s\S*$/)
+    t = ws > 0 ? cut.slice(0, ws) : ""
+  }
+  return clip(redact(t), n)
+}
+
 function toolHint(name, input = {}) {
   const h = input.file_path || input.notebook_path || input.command || input.pattern || input.url || input.description || ""
   // Redact before clipping, so a secret cut at the 140-character mark can't slip through half-matched.
-  return `${name}${h ? `(${clip(redact(String(h)).replace(/\s+/g, " "), 140)})` : ""}`
+  return `${name}${h ? `(${redactClip(String(h), 140).replace(/\s+/g, " ")})` : ""}`
 }
 
 // User prompts, assistant prose, tool names and the first 140 characters of each tool's
@@ -256,7 +288,7 @@ function userText(t) {
 }
 const INJECTED = /^\s*(<environment_context>|<user_instructions>|# AGENTS\.md instructions|Caveat: The messages below were generated by the user while running local commands)/
 
-const turn = (who, text, n) => `${who}: ${clip(redact(String(text)).replace(/\s*[\r\n]+\s*/g, " ").trim(), n)}`
+const turn = (who, text, n) => `${who}: ${redactClip(String(text), n).replace(/\s*[\r\n]+\s*/g, " ").trim()}`
 
 export async function digestTranscript(tool, file) {
   const raw = await fs.readFile(file, "utf-8")
@@ -604,7 +636,7 @@ export async function drain({ log = () => {} } = {}) {
         const stop = isTransient && (e.config || /HTTP 429/.test(String(e.message)) || !(await endpointUp(cfg)))
         if (!isTransient) job.attempts = (job.attempts || 0) + 1
         else if (!stop) job.transientFails = (job.transientFails || 0) + 1
-        job.lastError = redact(String(e.message || e)).slice(0, 300)
+        job.lastError = redact(String(e.message || e).slice(0, 2000)).slice(0, 300)
         const { file, ...rest } = job
         await store.withLock(file, async () => {
           if (!(await sameJob(job))) return

@@ -37,11 +37,12 @@ test("redaction: JSON-escaped quotes (Codex tool arguments)", () => {
 })
 
 test("redaction: provider key formats and credentials in command flags", () => {
+  // Fixtures are split so secret scanners don't flag the source; the joined values are what get tested.
   const secrets = {
-    stripe: "sk_live_51Habc123DEF456ghi789",
-    google: "AIzaSyA1234567890abcdefghijklmnopqrstuv",
-    gitlab: "glpat-abcdefghij0123456789",
-    npm: "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+    stripe: "sk_" + "live_51Habc123DEF456ghi789",
+    google: "AIza" + "SyA1234567890abcdefghijklmnopqrstuv",
+    gitlab: "glpat" + "-abcdefghij0123456789",
+    npm: "npm" + "_abcdefghijklmnopqrstuvwxyz0123456789",
   }
   const out = sum.redact([
     ...Object.values(secrets),

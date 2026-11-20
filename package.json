@@ -1,6 +1,6 @@
 {
   "name": "ws-board",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "ws: workstream state and resume prompts for Claude Code, Codex and Gemini CLI, with a local board.",
   "license": "MIT",

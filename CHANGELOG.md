@@ -4,10 +4,13 @@ All notable changes to ws. Versions follow [semantic versioning](https://semver.
 
 ## Unreleased
 
-### Added
-- **Gemini CLI support** (#5): `ws hook gemini start|end`, a reader for Gemini's session files (the current append-only `.jsonl` log and the older single-object `.json`), summarizer digests, and `ws setup --gemini`, which writes the hooks (millisecond timeouts) and the `ws` MCP server into `~/.gemini/settings.json` in one write. Honours `GEMINI_CLI_HOME`. When Gemini leaves `transcript_path` empty, the session file is found by its id.
-- **Board service on Linux** (#4): `ws board --install / --uninstall / --rebuild / --status` now work on Linux through a systemd user unit (`~/.config/systemd/user/<board.label>.service`). It runs the production build in `.next-prod`, binds to 127.0.0.1 on `board.port`, pins `WS_ROOT`, restarts on failure, and logs to the journal. Paths are escaped for systemd (spaces, quotes, `%`, `$`).
+## 0.2.0 — 2026-11-20
 
+Search, Gemini CLI support (preview), a Linux board service, WSL-only Windows, Node 22+, and fixes from an end-to-end review: input validation, safer resume prompts, broader and faster secret redaction, and board error states.
+
+### Added
+- **Gemini CLI support, preview** (#5): tested against recorded Gemini session files, not yet a live session; `ws go` can't launch Gemini yet (use `ws prompt --tool gemini`). `ws hook gemini start|end`, a reader for Gemini's session files (the current append-only `.jsonl` log and the older single-object `.json`), summarizer digests, and `ws setup --gemini`, which writes the hooks (millisecond timeouts) and the `ws` MCP server into `~/.gemini/settings.json` in one write. Honours `GEMINI_CLI_HOME`. When Gemini leaves `transcript_path` empty, the session file is found by its id.
+- **Board service on Linux** (#4): `ws board --install / --uninstall / --rebuild / --status` now work on Linux through a systemd user unit (`~/.config/systemd/user/<board.label>.service`). It runs the production build in `.next-prod`, binds to 127.0.0.1 on `board.port`, pins `WS_ROOT`, restarts on failure, and logs to the journal. Paths are escaped for systemd (spaces, quotes, `%`, `$`).
 - **Search**: `ws find <words>` (also `ws search`), the `ws_find` MCP tool, and a search box on the board (press `/`). It covers workstream titles, open and closed items, decisions (including their why and rejected options), session logs (summaries and files touched) and the inbox. Every word must match one record; `"quoted phrases"` match exactly; an ID like `BG-3` finds that record first and doesn't match `BG-30`. Closed items and superseded decisions are labelled and ranked after current records; `--current` leaves them out. Filters: `--ws`, `--kind`, `--limit`, `--json`. On the board, the columns narrow to workstreams with a match.
 
 ### Fixed

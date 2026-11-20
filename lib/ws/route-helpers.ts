@@ -63,12 +63,6 @@ export function writeGuard(req: Request): NextResponse | null {
   return null
 }
 
-// For older routes whose clients may not send JSON (e.g. body-less POSTs): browsers always
-// send Origin on cross-site POSTs, so a host+origin check is enough there.
-export function originGuard(req: Request): NextResponse | null {
-  return localOnly(req)
-}
-
 export async function writeJson<T>(req: Request, fn: (body: any) => Promise<T>) {
   const denied = writeGuard(req)
   if (denied) return denied

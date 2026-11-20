@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Workstream state for Claude Code and Codex: save status, recall a resume prompt.",
+  "description": "Workstream state for Claude Code, Codex and Gemini CLI: save status, recall a resume prompt.",
   "bin": {
     "ws": "bin/ws.mjs"
   },
@@ -16,7 +16,7 @@
     "zod": "^4.6.7"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "license": "MIT"
 }

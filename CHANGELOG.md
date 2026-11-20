@@ -4,6 +4,10 @@ All notable changes to ws. Versions follow [semantic versioning](https://semver.
 
 ## Unreleased
 
+## 0.2.1 — 2026-11-20
+
+Gemini CLI support is complete: checked against a live session, and `ws go` can launch it.
+
 ### Added
 - **`ws go --gemini`** (or `tool: gemini`): launches Gemini CLI with the resume prompt (`gemini -i`), and `--resume` continues the last Gemini session by id. Checked against a live Gemini CLI 0.70 session, which also confirmed the start note, the `ws` MCP tools and session logging.
 

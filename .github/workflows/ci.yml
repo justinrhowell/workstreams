@@ -6,8 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+# A new push to a PR branch cancels that PR's older runs. Pushes to main always
+# run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
-  NODE_VERSION: '20.x'
+  NODE_VERSION: '22.x'
 
 # ws runs on your own machine against folders of markdown files, so there is
 # nothing to deploy and no credentials to inject. CI proves the board lints,
@@ -21,13 +30,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['20.x', '22.x']
+        node-version: ['22.x', '24.x']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -47,38 +56,6 @@ jobs:
       - name: Build
         run: npm run build
 
-  mcp:
-    name: MCP server starts
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-          cache-dependency-path: ws/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-        working-directory: ws
-
-      # Handshake over stdio and list the tools, so a broken server is caught
-      # here rather than the first time someone wires it into Claude Code.
-      - name: Initialize and list tools
-        run: |
-          export WS_ROOT="$(mktemp -d)"
-          printf '%s\n' \
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
-            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-            | node ws/mcp/server.mjs | tee /tmp/mcp.out
-          for t in ws_list ws_show ws_find ws_compose ws_item_add ws_item_close ws_log; do
-            grep -q "\"$t\"" /tmp/mcp.out || { echo "missing tool $t"; exit 1; }
-          done
-
   ws:
     name: ws CLI, hooks, summarizer, MCP (${{ matrix.os }}, ${{ matrix.node-version }})
     runs-on: ${{ matrix.os }}
@@ -86,15 +63,15 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        node-version: ['20.x', '22.x']
+        node-version: ['22.x', '24.x']
     defaults:
       run:
         working-directory: ws
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -116,10 +93,10 @@ jobs:
       run:
         working-directory: ws
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'

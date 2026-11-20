@@ -14,7 +14,7 @@ The rule that makes WSL work: **ws, Node, your data and your agent CLIs all live
 
    Then open the distribution's shell. Everything below runs there.
 
-2. Install Node 20.9 or newer **inside WSL**, for example with [nvm](https://github.com/nvm-sh/nvm):
+2. Install Node 22 or newer **inside WSL**, for example with [nvm](https://github.com/nvm-sh/nvm):
 
    ```bash
    nvm install 22

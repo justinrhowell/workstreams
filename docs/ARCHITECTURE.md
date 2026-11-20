@@ -73,7 +73,7 @@ All writers go through `ws/lib`. That way item IDs are allocated once, the `open
 
 - `ws go <id>` opens the composed prompt in `$VISUAL`, else `$EDITOR`, else `nano` (run through `sh`, so `code --wait` works), with the cursor on the input slot when the editor supports `+LINE` (nano, vim, nvim, emacs, micro). On save it launches `claude -n "<title>"` or `codex` in the workstream's cwd with `WS_ID` set. `--resume` reuses a session from the last 12 hours.
 - `ws prompt <id>` copies the prompt for desktop or web apps.
-- The MCP tools (`ws_show`, `ws_compose`, `ws_item_*`, `ws_log`, …) give both CLIs a native way to read and write.
+- The MCP tools (`ws_show`, `ws_compose`, `ws_item_*`, `ws_log`, …) give Claude Code, Codex and Gemini CLI a native way to read and write.
 - `ws find`, the `ws_find` MCP tool and the board's search box share `ws/lib/search.mjs`. It scans the files on each query; there is no index to keep in sync, and at this size a scan takes milliseconds. Every word must match within one record (a workstream, an item, a decision, a session log or an inbox entry). An ID-shaped word like `BG-3` matches whole IDs only, so it doesn't find `BG-30`. Closed items and superseded decisions are included, because finding history is the point, but they rank after current records and every surface labels them (`[closed item]`, `[superseded decision → …]`, a struck-through row on the board). `--current` / `current: true` leaves them out.
 - A "park" or handoff skill in your agent setup can call the same MCP tools to record what a session changed before you switch away.
 

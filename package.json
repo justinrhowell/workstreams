@@ -2,14 +2,14 @@
   "name": "ws-board",
   "version": "0.1.0",
   "private": true,
-  "description": "ws: workstream state and resume prompts for Claude Code and Codex, with a local board.",
+  "description": "ws: workstream state and resume prompts for Claude Code, Codex and Gemini CLI, with a local board.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/justinrhowell/workstreams.git"
   },
   "engines": {
-    "node": ">=20.9"
+    "node": ">=22"
   },
   "scripts": {
     "dev": "next dev -H 127.0.0.1 -p 3311",

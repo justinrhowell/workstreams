@@ -26,7 +26,7 @@ npm --prefix ws test   # node:test suite for the CLI, hooks, summarizer and MCP 
 npm run lint && npm run type-check && npm test && npm run build   # if you touched the board
 ```
 
-CI runs all of these on Node 20 and 22, the ws suite on both Ubuntu and macOS, and `ws/test/platform.test.mjs` on Windows.
+CI runs all of these on Node 22 and 24, the ws suite on both Ubuntu and macOS, and `ws/test/platform.test.mjs` on Windows.
 
 ## Ground rules
 

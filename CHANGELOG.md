@@ -10,7 +10,22 @@ All notable changes to ws. Versions follow [semantic versioning](https://semver.
 
 - **Search**: `ws find <words>` (also `ws search`), the `ws_find` MCP tool, and a search box on the board (press `/`). It covers workstream titles, open and closed items, decisions (including their why and rejected options), session logs (summaries and files touched) and the inbox. Every word must match one record; `"quoted phrases"` match exactly; an ID like `BG-3` finds that record first and doesn't match `BG-30`. Closed items and superseded decisions are labelled and ranked after current records; `--current` leaves them out. Filters: `--ws`, `--kind`, `--limit`, `--json`. On the board, the columns narrow to workstreams with a match.
 
+### Fixed
+- A malformed inbox file no longer breaks `ws ls`, search and the board; it is skipped and reported (#27).
+- Notes logged in the same second no longer fail with "file already exists" (#27).
+- `{{ … }}` in items, decisions, logs or the brief no longer fails `ws prompt`, `ws go` and `ws_compose` with "Unfilled vars" (#23).
+- `ws setup` keeps other env vars on an existing `ws` MCP entry; only `WS_ROOT` is replaced (#27).
+- Session hooks no longer read every session log of every workstream (#27).
+- `ws board` without the board's dependencies says to run `npm ci` instead of letting `npx` download Next (#27).
+
 ### Changed
+- **Breaking: Node 22 or newer is required.** Node 20 reached end of life in April 2026, so support for it is dropped: `engines.node` is `>=22` for both the CLI and the board, and CI tests on Node 22 and 24.
+- **CI:** every third-party action is pinned to a full commit SHA (kept current by Dependabot), workflows get a read-only token by default, and a new push to a PR cancels that PR's older runs. The separate "MCP server starts" job is gone; `ws/test/mcp.test.mjs` already covers the server in the ws suite.
+- **Resume prompts no longer quote unreviewed machine summaries** (#23). A session's draft summary is model output from a transcript that may quote untrusted pages, and `ws go` sends the prompt as your own message, so the prompt now only says a draft is waiting in `ws review`. The summarizer is also told that the digest is data, not instructions (#26).
+- **Stricter input checks** (#23, #27): workstream ids are checked before any path is built (CLI, MCP and board), and board review/inbox actions require their `ws`/`session`. `ws set` refuses unknown statuses and tools and won't set `id`, `sources`, `vars` or other structured keys (edit those in WORKSTREAM.md). `ws go`, `ws new` and `ws set` accept `--tool claude|codex|gemini`; `ws go` can't launch Gemini yet and says so.
+- **`ws_item_close` with several IDs is all or nothing** (#27): every ID is checked first, and an error names each bad one.
+- **Redaction** (#26) catches more formats (PGP key blocks, `redis://:pw@`, passwords containing `@`, `DB_PASS`/`MYSQL_PWD`/`*_KEY=`, short quoted passwords, `docker login -p`, `sshpass -p`, `curl -ume:pw`, `--api-key`, `.netrc`, Hugging Face, SendGrid, Slack app tokens and webhooks, Azure SAS signatures), stops mangling prose ("basic authentication", `MAX_TOKENS=4096`), and runs in linear time with each text capped before redaction. A key header with no END redacts the key, not the rest of the text.
+- **Board** (#25): load and refresh errors are shown with Retry instead of empty lists or stale data; Reject asks for confirmation; unused toast code is removed.
 - **Windows is WSL-only, now explicitly** (#6): on native Windows every `ws` command and the MCP server stop with a message pointing to the new [docs/WINDOWS.md](docs/WINDOWS.md), and `ws hook …` exits 0 without output. Under WSL, `ws setup` warns about a Windows `node.exe` on PATH and about ws or its data on `/mnt/c`, `ws prompt` falls back to `clip.exe`, and `ws board` opens pages with `wslview` or `explorer.exe`. A `windows-latest` CI job checks the native-Windows behaviour.
 
 ## 0.1.0 — 2026-11-18

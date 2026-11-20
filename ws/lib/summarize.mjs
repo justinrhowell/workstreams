@@ -174,7 +174,7 @@ const Q = String.raw`(?:\\?["'])?`
 const VAL = String.raw`[^\s"'\\&,;|]`
 // A credential value: quoted (plain or JSON-escaped), redacted through its closing quote
 // even if it holds spaces or punctuation; or unquoted, up to the next delimiter.
-const VALUE = String.raw`(\\"(?:(?!\\").){0,512}\\"|"(?:[^"\\\n]|\\.){0,512}"|'[^'\n]{0,512}'|${VAL}{1,512})`
+const VALUE = String.raw`(\\"(?:(?!\\").){0,16384}\\"|"(?:[^"\\\n]|\\.){0,16384}"|'[^'\n]{0,16384}'|${VAL}{1,16384})`
 // Replacer for a (prefix)(value) match: keeps the prefix and any quotes, and redacts the
 // value when `ok(contents, prefix)` accepts it. A double-quoted value may hold \" escapes.
 const mask = (ok = () => true) => (m, pre, v) => {
@@ -184,30 +184,31 @@ const mask = (ok = () => true) => (m, pre, v) => {
   // Not a credential itself, but it may hold one (token: "notes password=abc12345").
   return q && inner ? `${pre}${q}${redact(inner)}${q}` : m
 }
-// Every repetition is bounded ({0,40}, {0,200}…), so a long run of key-like text costs
-// linear time, not quadratic. Text is also capped per turn before it gets here (redactClip).
+// Every repetition is bounded: names and gaps tightly ({0,40}, {0,200}), secret bodies
+// at 16384, above the per-turn cap, so long secrets are still fully redacted. A long run
+// of key-like text then costs linear time, not quadratic. Text is also capped per turn before it gets here (redactClip).
 const KEY_SUFFIX = String.raw`[A-Za-z0-9_-]{0,40}`
 const PEM = String.raw`-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----`
 const SECRET_PATTERNS = [
   // A complete key block; or, with no END in sight (clipped, pasted partially), the header
   // plus the base64 and armor-header lines that follow it, and nothing after.
-  [new RegExp(String.raw`${PEM}(?:[\s\S]{0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----|(?:\s+(?:[A-Za-z0-9+/=]{16,8192}|[A-Za-z-]{1,40}: [^\n]{0,200}))*)`, "g"), "[redacted key]"],
-  [/\b(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,512})/g, "[redacted]"],
-  [/\b(gh[pousr]_[A-Za-z0-9]{20,512}|github_pat_[A-Za-z0-9_]{20,512})/g, "[redacted]"],
-  [/\b(?:xox[abprs]|xapp)-[A-Za-z0-9-]{10,512}/g, "[redacted]"], // Slack tokens
-  [/\bhooks\.slack\.com\/services\/[A-Za-z0-9/]{10,512}/g, "hooks.slack.com/services/[redacted]"],
+  [new RegExp(String.raw`${PEM}(?:[\s\S]{0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----|(?:(?:\s|\\[rn]){1,8}(?:[A-Za-z0-9+/=]{16,16384}|[A-Za-z-]{1,40}: [^\n\\]{0,200}))*)`, "g"), "[redacted key]"],
+  [/\b(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,16384})/g, "[redacted]"],
+  [/\b(gh[pousr]_[A-Za-z0-9]{20,16384}|github_pat_[A-Za-z0-9_]{20,16384})/g, "[redacted]"],
+  [/\b(?:xox[abprs]|xapp)-[A-Za-z0-9-]{10,16384}/g, "[redacted]"], // Slack tokens
+  [/\bhooks\.slack\.com\/services\/[A-Za-z0-9/]{10,16384}/g, "hooks.slack.com/services/[redacted]"],
   [/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted]"],
-  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,512}/g, "[redacted]"], // Stripe secret / restricted keys
+  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,16384}/g, "[redacted]"], // Stripe secret / restricted keys
   [/\bAIza[0-9A-Za-z_-]{35}/g, "[redacted]"], // Google API keys
-  [/\bglpat-[A-Za-z0-9_-]{20,512}/g, "[redacted]"], // GitLab
+  [/\bglpat-[A-Za-z0-9_-]{20,16384}/g, "[redacted]"], // GitLab
   [/\bnpm_[A-Za-z0-9]{36}\b/g, "[redacted]"], // npm
-  [/\bhf_[A-Za-z0-9]{30,512}/g, "[redacted]"], // Hugging Face
-  [/\bSG\.[A-Za-z0-9_-]{16,512}\.[A-Za-z0-9_-]{16,512}/g, "[redacted]"], // SendGrid
-  [/([?&]sig=)[A-Za-z0-9%+/=]{10,512}/g, "$1[redacted]"], // Azure SAS signatures
-  [/\beyJ[A-Za-z0-9_-]{10,4096}\.[A-Za-z0-9_-]{10,4096}\.[A-Za-z0-9_-]{5,4096}/g, "[redacted jwt]"],
+  [/\bhf_[A-Za-z0-9]{30,16384}/g, "[redacted]"], // Hugging Face
+  [/\bSG\.[A-Za-z0-9_-]{16,16384}\.[A-Za-z0-9_-]{16,16384}/g, "[redacted]"], // SendGrid
+  [/([?&]sig=)[A-Za-z0-9%+/=]{10,16384}/g, "$1[redacted]"], // Azure SAS signatures
+  [/\beyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{10,16384}\.[A-Za-z0-9_-]{5,16384}/g, "[redacted jwt]"],
   // Case-insensitive (headers are often lowercase), but the value must look like a token
-  // (a digit, or mixed case), so prose like "basic authentication" is left alone.
-  [/\b(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{12,512})/gi, (m, kind, v) => (/\d/.test(v) || (/[a-z]/.test(v) && /[A-Z]/.test(v)) ? `${kind} [redacted]` : m)],
+  // (a digit, or a capital after the first letter), so prose like "basic authentication" is left alone.
+  [/\b(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{12,16384})/gi, (m, kind, v) => (/\d/.test(v) || (/[a-z]/.test(v) && /[A-Z]/.test(v.slice(1))) ? `${kind} [redacted]` : m)],
   // Shell-style NAME=value where the name says it is a credential (AWS_SECRET_ACCESS_KEY,
   // DB_PASS, MYSQL_PWD, GITHUB_TOKEN, ENCRYPTION_KEY): redacted whatever the value looks
   // like, however short. MAX_TOKENS / TOKENIZER_* / BYPASS_* are not credentials.
@@ -223,7 +224,7 @@ const SECRET_PATTERNS = [
       : v.length >= 8 && /\d/.test(v) && /[A-Za-z]/.test(v) && !/\s/.test(v))],
   // Credentials passed as command-line flags.
   [new RegExp(String.raw`((?:^|\s)--(?:password|passwd|api-key|apikey|token|secret)[= ])${VALUE}`, "g"), mask()],
-  [new RegExp(String.raw`((?:^|\s)(?:-u ?|--user[= ])${Q}[^\s:"'\\]{1,200}:)${VAL}{1,512}`, "g"), "$1[redacted]"],
+  [new RegExp(String.raw`((?:^|\s)(?:-u ?|--user[= ])${Q}[^\s:"'\\]{1,200}:)${VAL}{1,16384}`, "g"), "$1[redacted]"],
   [new RegExp(String.raw`(\b(?:mysql|mysqldump|mysqladmin|mariadb|sshpass|docker\s+login|podman\s+login)\b[^\n|;&]{0,200}?\s-p ?)${VALUE}`, "g"), mask()],
   [new RegExp(String.raw`(\bmachine\s+\S{1,200}\s+login\s+\S{1,200}\s+password\s+)${VALUE}`, "g"), mask()], // .netrc
   // user:password@host in URLs; the user may be empty (redis://:pw@host) and the password

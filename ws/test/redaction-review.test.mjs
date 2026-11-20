@@ -42,8 +42,23 @@ test("formats that used to leak are redacted", () => {
   }
 })
 
+test("long secrets are redacted in full, not just their first part", () => {
+  const b64 = "A".repeat(3000) + "zz9"
+  const cases = {
+    unquoted: "PRIVATE_KEY_B64=" + b64,
+    quoted: 'PRIVATE_KEY_B64="' + b64 + '"',
+    bearer: "Bearer " + "a1".repeat(450),
+    jwt: j("eyJ", "a".repeat(20), ".", "b".repeat(5000), ".", "c".repeat(40)),
+    "escaped newlines": j('"private_key": "-----BEGIN PRIVATE KEY-----', "\\nMIIE", "Q".repeat(80), "\\n", "R".repeat(64), '\\n"'),
+  }
+  for (const [name, input] of Object.entries(cases)) {
+    assert.doesNotMatch(redact(input), /zz9|a1a1a1a1|bbbbbbbbbb|QQQQ|RRRR/, name)
+  }
+})
+
 test("ordinary prose and settings are left alone", () => {
   for (const text of [
+    "Basic Authentication and Token Verification",
     "Added basic authentication to the token validation endpoint",
     "The token documentation is out of date",
     "MAX_TOKENS=4096 TOKENIZERS_PARALLELISM=false",
@@ -75,6 +90,10 @@ test("long runs of key-like text take linear time", () => {
 
 test("a several-MB unbroken token doesn't overflow the stack", () => {
   for (const s of ["sk-" + "a".repeat(8_000_000), "GITHUB_TOKEN=" + "a".repeat(8_000_000), 'password: "' + "a".repeat(8_000_000) + '"', "-----BEGIN PRIVATE KEY-----\n" + "A".repeat(8_000_000)]) {
-    assert.doesNotThrow(() => redact(s), s.slice(0, 20))
+    let out
+    assert.doesNotThrow(() => { out = redact(s) }, s.slice(0, 20))
+    // Callers cap each text at a few KB (redactClip), so only the start matters here.
+    // (A quoted value longer than 16 KB isn't matched; callers never pass one.)
+    if (!s.startsWith("password")) assert.match(out.slice(0, 40), /\[redacted/, s.slice(0, 20))
   }
 })

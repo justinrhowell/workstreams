@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ws: save and recall workstream state across Claude Code and Codex sessions.
 import { spawnSync } from "node:child_process"
-import { promises as fs } from "node:fs"
+import { promises as fs, existsSync } from "node:fs"
 import { parseArgs } from "node:util"
 import readline from "node:readline/promises"
 import path from "node:path"
@@ -17,7 +17,7 @@ import { renderUnit, systemdService } from "../lib/board-service.mjs"
 import { fileURLToPath } from "node:url"
 import { platformProblem, isWsl } from "../lib/platform.mjs"
 
-const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.tildify(store.ROOT)})
+const HELP = `ws: workstream state for Claude Code, Codex and Gemini CLI   (data: ${store.tildify(store.ROOT)})
 
   ws setup [--claude] [--codex] [--gemini] [--dry-run] [--no-link] [--no-hooks] [--no-mcp]
                                    create the data folder, put ws on PATH, add hooks + MCP to Claude Code / Codex / Gemini CLI
@@ -30,7 +30,7 @@ const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.ti
   ws prompt <id> [--tool codex] [--inline] [--no-copy]
                                    print the resume prompt and copy it to the clipboard
   ws go <id> [--codex] [--resume]  edit the prompt (fill the input slot), then launch in cwd
-  ws new <id> --title T --cwd DIR [--group G] [--prefix P] [--tool claude|codex]
+  ws new <id> --title T --cwd DIR [--group G] [--prefix P] [--tool claude|codex|gemini]
   ws archive <id> | ws unarchive <id>   hide a finished workstream (kept; unarchive restores its status)
   ws delete <id> [--yes]           move it to the trash (restorable)
   ws trash [restore <name> | empty [<name>] --yes]
@@ -52,7 +52,7 @@ const HELP = `ws: workstream state for Claude Code and Codex   (data: ${store.ti
   ws summarize <id> --session S    queue one linked session for a proposal
   ws eval [--runs N] [--case NAME]  score the summarizer on real sessions in $WS_ROOT/eval; fails below the floors
   ws stale [--days N]              active/waiting workstreams with no session in N days (default 7)
-  ws board                         open the board (starts the background service if installed, else a dev server)
+  ws board [--no-open]             open the board (starts the background service if installed, else a dev server)
   ws board --install | --uninstall install/remove the background service (starts at login; 127.0.0.1:3311)
   ws board --rebuild | --status    rebuild after updating ws, then restart; or show service state
   ws board --dev [--port N]        run a dev server in this terminal instead
@@ -88,7 +88,9 @@ const ago = (ms) => {
 }
 
 async function counts() {
-  const [inbox, props, queue, failed] = await Promise.all([capture.listInbox(), summarize.listProposals(), summarize.listQueue(), summarize.listFailed()])
+  const broken = []
+  const [inbox, props, queue, failed] = await Promise.all([capture.listInbox({ broken }), summarize.listProposals(), summarize.listQueue(), summarize.listFailed()])
+  reportBroken(broken)
   const bits = [inbox.length && `${inbox.length} in inbox (ws inbox)`, props.length && `${props.length} to review (ws review)`, queue.length && `${queue.length} queued`,
     failed.length && `${failed.length} summaries failed (ws summarize --requeue)`].filter(Boolean)
   return bits.length ? dim(bits.join(" · ")) : ""
@@ -171,9 +173,15 @@ async function ask(q) {
   try { return (await rl.question(q)).trim() } finally { rl.close() }
 }
 
+// Tools `ws go` can launch, with the argv shape each one takes.
+const LAUNCHABLE = ["claude", "codex"]
+const TOOLS = [...LAUNCHABLE, "gemini"]
+
 async function cmdGo(id) {
   const tool = opt.codex ? "codex" : opt.claude ? "claude" : opt.tool || undefined
+  if (tool && !TOOLS.includes(tool)) die(`--tool must be one of ${TOOLS.join(", ")}`)
   const { ws, tool: t, text } = await compose(id, { tool, inline: opt.inline })
+  if (!LAUNCHABLE.includes(t)) die(`ws go can't launch ${t} yet. Run \`ws prompt ${id} --tool ${t}\` and paste the prompt, or use --tool claude|codex.`)
   const tmp = path.join(os.tmpdir(), `ws-${id}-${Date.now()}.md`)
   await fs.writeFile(tmp, text)
   // $VISUAL, then $EDITOR, then nano. Run through the shell so quoted paths and
@@ -219,12 +227,17 @@ async function cmdPick() {
 }
 
 async function cmdNew(id) {
+  if (opt.tool && !TOOLS.includes(opt.tool)) die(`--tool must be one of ${TOOLS.join(", ")}`)
   const w = await store.createWorkstream(need(id, "<id>"), {
     title: opt.title || id, group: opt.group, cwd: opt.cwd && store.tildify(path.resolve(store.expand(opt.cwd))),
     prefix: opt.prefix, tool: opt.tool,
   })
   console.log(`Created ${store.tildify(w.file)}\nAdd sources/procedure/vars there, then: ws prompt ${id}`)
 }
+
+// Keys whose values are lists or maps, or that ws manages: a key=value string would
+// break the workstream, so they are edited in WORKSTREAM.md by hand.
+const SET_REFUSED = ["id", "sources", "vars", "archived_from", "archived_at", "created"]
 
 async function cmdSet(id, pairs) {
   const patch = {}
@@ -233,6 +246,11 @@ async function cmdSet(id, pairs) {
     if (i < 1) die(`expected key=value, got "${p}"`)
     patch[p.slice(0, i)] = p.slice(i + 1)
   }
+  for (const k of Object.keys(patch)) {
+    if (SET_REFUSED.includes(k)) die(`${k} can't be set with ws set; edit it in WORKSTREAM.md (ws show ${id} prints the path)`)
+  }
+  if ("status" in patch && !store.STATUSES.includes(patch.status)) die(`status must be one of ${store.STATUSES.join(", ")}`)
+  if ("tool" in patch && !TOOLS.includes(patch.tool)) die(`tool must be one of ${TOOLS.join(", ")}`)
   // Same as `ws new --cwd`: a relative folder would be resolved against each session's own
   // folder by the hooks, so `cwd=.` would claim every session on the machine.
   if (patch.cwd) patch.cwd = store.tildify(path.resolve(store.expand(patch.cwd)))
@@ -498,7 +516,15 @@ function stableNode() {
   return process.execPath
 }
 
+// Without the board's dependencies, npx would try to download Next instead of saying so.
+function needBoardDeps() {
+  if (!existsSync(path.join(boardApp(), "node_modules", "next", "package.json"))) {
+    die(`The board's dependencies aren't installed. Run: npm --prefix "${boardApp()}" ci`)
+  }
+}
+
 function buildBoard() {
+  needBoardDeps()
   console.log("Building the board (production)…")
   const r = spawnSync("npx", ["next", "build"], { cwd: boardApp(), stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, NEXT_DIST_DIR: BOARD_DIST } })
   if (r.status !== 0) die("Build failed; the service was not changed.")
@@ -573,6 +599,7 @@ async function cmdBoardSystemd() {
 
 // No service (or --dev): a dev server in this terminal.
 function devBoard() {
+  needBoardDeps()
   const port = String(opt.port || BOARD_PORT)
   if (!opt.dev) console.log(dim("Tip: ws board --install keeps it running in the background."))
   console.log(`Board: http://127.0.0.1:${port}  (data: ${store.tildify(store.ROOT)}; Ctrl-C to stop)`)

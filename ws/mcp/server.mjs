@@ -142,8 +142,7 @@ server.registerTool(
     },
   },
   safe(async ({ id, items, note }) => {
-    const out = []
-    for (const it of items) out.push(await store.closeItem(id, it, { note }))
+    const out = await store.closeItems(id, items, { note })
     return text(out.map((i) => `Closed ${i.id}: ${i.text}`).join("\n"))
   }),
 )
@@ -194,7 +193,7 @@ server.registerTool(
     inputSchema: {
       id,
       summary: z.string().describe("What changed, in 1–3 sentences; first sentence is shown in future resume prompts"),
-      tool: z.enum(["claude", "codex"]).optional(),
+      tool: z.enum(["claude", "codex", "gemini"]).optional(),
       closed: z.array(z.string()).optional().describe("Item IDs closed this session"),
       added: z.array(z.string()).optional().describe("Item IDs added this session"),
     },

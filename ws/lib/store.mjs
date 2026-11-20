@@ -106,7 +106,10 @@ export function defaultPrefix(id) {
 // One unreadable workstream (a hand-edit that broke the YAML, a bad `ws set`, a stray
 // folder) must not hide the others: hooks, ls, MCP and the board all list through here.
 // It is skipped, and pushed onto `broken` for callers that report problems.
-export async function listWorkstreams({ broken } = {}) {
+// logs: false skips reading session logs (hooks only need cwd and status); lastActivity
+// then falls back to the created date.
+/** @param {{ broken?: { id: string, error: string }[], logs?: boolean }} [opts] */
+export async function listWorkstreams({ broken, logs = true } = {}) {
   let ids = []
   try { ids = await fs.readdir(WS_DIR) } catch { return [] }
   const out = []
@@ -123,7 +126,7 @@ export async function listWorkstreams({ broken } = {}) {
       continue
     }
     try {
-      out.push(await getWorkstream(id))
+      out.push(await getWorkstream(id, { logs }))
     } catch (e) {
       // YAML errors carry a multi-line code frame; the first line says what and where.
       broken?.push({ id, error: String(e instanceof Error ? e.message : e).split("\n")[0].replace(/:\s*$/, "") })
@@ -141,13 +144,13 @@ export function assertId(id) {
   return id
 }
 
-export async function getWorkstream(id) {
+export async function getWorkstream(id, { logs: withLogs = true } = {}) {
   const dir = path.join(WS_DIR, id)
   const file = path.join(dir, "WORKSTREAM.md")
   const raw = isId(id) ? await readText(file) : null
   if (raw === null) throw new Error(`No workstream "${id}" (looked in ${tildify(dir)})`)
   const { data, content } = parseMd(raw)
-  const logs = await listLogs(id)
+  const logs = withLogs ? await listLogs(id) : []
   const stat = await fs.stat(file)
   // Work happens in sessions: staleness counts from the newest session end, not file edits.
   const ends = logs.map((l) => Date.parse(l.ended)).filter((t) => !Number.isNaN(t))
@@ -592,16 +595,27 @@ export function addItem(id, text, { waiting } = {}) {
   })
 }
 
-export function closeItem(id, itemId, { session, note } = {}) {
+export async function closeItem(id, itemId, opts = {}) {
+  return (await closeItems(id, [itemId], opts))[0]
+}
+
+// All or nothing: every ID is checked before any is closed, in one write, so a bad ID in
+// a list never leaves the others half-closed behind an error.
+export function closeItems(id, itemIds, { session, note } = {}) {
   return mutateOpen(id, (state) => {
-    const item = state.items.find((i) => i.id.toUpperCase() === itemId.toUpperCase())
-    if (!item) throw new Error(`${itemId} not found in ${id}`)
-    if (item.done) throw new Error(`${itemId} is already closed`)
-    item.done = true
+    const items = [], problems = []
+    for (const itemId of itemIds) {
+      const item = state.items.find((i) => i.id.toUpperCase() === String(itemId).toUpperCase())
+      if (!item) problems.push(`${itemId} not found in ${id}`)
+      else if (item.done) problems.push(`${itemId} is already closed`)
+      else if (!items.includes(item)) items.push(item)
+    }
+    if (problems.length) throw new Error(problems.join("; ") + (itemIds.length > 1 ? " (nothing was closed)" : ""))
     // Keep open.md readable: the full evidence lives in the session log, not in this line.
     const n = note && oneLine(note).replace(/[()]/g, "")
-    item.closed = [today(), session && oneLine(session).slice(0, 8), n && (n.length > 160 ? n.slice(0, 159) + "…" : n)].filter(Boolean).join(", ")
-    return item
+    const closed = [today(), session && oneLine(session).slice(0, 8), n && (n.length > 160 ? n.slice(0, 159) + "…" : n)].filter(Boolean).join(", ")
+    for (const item of items) { item.done = true; item.closed = closed }
+    return items
   })
 }
 
@@ -733,13 +747,19 @@ export async function appendLog(id, entry) {
   const tag = entry.session ? sessionTag(entry.session) : "manual-" + now.toISOString().slice(11, 19).replace(/:/g, "")
   const dir = path.join(ws.dir, "log")
   await fs.mkdir(dir, { recursive: true })
-  let file = path.join(dir, `${today()}_${tag}.md`)
-  for (let n = 2; await exists(file); n++) file = path.join(dir, `${today()}_${tag}-${n}.md`)
   const { summary = "", ...meta } = entry
   const data = { ended: now.toISOString(), source: "manual", ...meta }
   for (const k of Object.keys(data)) if (data[k] === undefined || data[k] === null) delete data[k]
-  await createFileAtomic(file, matter.stringify(`\n${summary.trim()}\n`, data))
-  return file
+  const text = matter.stringify(`\n${summary.trim()}\n`, data)
+  // Two notes in the same second share a name; the loser of the exclusive create takes
+  // the next free suffix instead of failing.
+  for (let n = 1; ; n++) {
+    const file = path.join(dir, `${today()}_${tag}${n > 1 ? `-${n}` : ""}.md`)
+    if (await exists(file)) continue
+    try { await createFileAtomic(file, text); return file } catch (e) {
+      if (e.code !== "EEXIST" || n > 1000) throw e
+    }
+  }
 }
 
 // Codex IDs are time-ordered UUIDs, so the first 8 chars collide within a minute; add the tail.

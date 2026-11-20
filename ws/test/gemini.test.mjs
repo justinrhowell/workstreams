@@ -27,6 +27,8 @@ const at = (m) => `2026-11-18T10:${String(m).padStart(2, "0")}:00Z`
 // calls finished, a $patch for a tool result, a $rewindTo that drops a turn, and $set.
 function jsonlSession({ sessionId = SID, kind } = {}) {
   const meta = { sessionId, projectHash: "abc", startTime: at(0), lastUpdated: at(0), ...(kind ? { kind } : {}) }
+  // Gemini CLI's own setup message, sent as "user" (seen in a live 0.70 session): not a user turn.
+  const u0 = { id: "u0", timestamp: at(0), type: "user", content: [{ text: "<session_context>\nThis is the Gemini CLI. Today's date is …\nDirectory Structure: …\n</session_context>" }] }
   const u1 = { id: "u1", timestamp: at(1), type: "user", content: [{ text: "Fix the header layout" }] }
   const g1 = { id: "g1", timestamp: at(2), type: "gemini", content: "", toolCalls: [{ id: "t1", name: "read_file", args: { file_path: "src/a.ts" }, status: "executing", timestamp: at(2) }] }
   const g1b = { ...g1, content: "Updated the header.", toolCalls: [
@@ -40,7 +42,7 @@ function jsonlSession({ sessionId = SID, kind } = {}) {
   const u3 = { id: "u3", timestamp: at(6), type: "user", content: [{ text: "Now check mobile" }] }
   const g3 = { id: "g3", timestamp: at(7), type: "gemini", content: [{ text: "thinking", thought: true }, { text: "Mobile looks right." }] }
   return jl(
-    meta, u1, g1,
+    meta, u0, u1, g1,
     { $patch: { id: "g1", toolCalls: [{ id: "t1", result: [{ text: "file body" }] }] } },
     g1b, // same id again: last copy wins, counted once
     u2,
@@ -68,8 +70,8 @@ test("loadGeminiSession folds re-appended messages, patches, rewinds and $set", 
   const { meta, messages } = loadGeminiSession(jsonlSession())
   assert.equal(meta.sessionId, SID)
   assert.equal(meta.summary, "Header layout fix")
-  assert.deepEqual(messages.map((m) => m.id), ["u1", "g1", "u3", "g3", "i1"])
-  assert.equal(messages[1].toolCalls.length, 5, "the later full copy of g1 wins")
+  assert.deepEqual(messages.map((m) => m.id), ["u0", "u1", "g1", "u3", "g3", "i1"])
+  assert.equal(messages[2].toolCalls.length, 5, "the later full copy of g1 wins")
 })
 
 test("loadGeminiSession reads the legacy single-object .json format", () => {
@@ -153,6 +155,7 @@ test("digestTranscript(gemini): user and assistant text, tool hints; no thoughts
   assert.ok(!d.includes("oops"), "rewound turn is gone")
   assert.ok(!d.includes("thinking"), "thought parts are not assistant text")
   assert.ok(!d.includes("file body"), "tool output is never included")
+  assert.ok(!d.includes("session_context") && !d.includes("Directory Structure"), "Gemini's setup message isn't a user turn")
 })
 
 test("ws hook gemini start prints JSON-only stdout with additionalContext", () => {

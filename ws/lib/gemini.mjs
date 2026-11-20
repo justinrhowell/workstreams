@@ -81,6 +81,11 @@ function patch(byId, p) {
 }
 
 // Text of a PartListUnion: a string, a Part ({ text }) or an array of either.
+// Gemini CLI sends its own setup (date, OS, folder listing) as the first "user" message,
+// wrapped in <session_context>. It isn't something the user typed.
+export const GEMINI_INJECTED = /^\s*<session_context>/
+export const isGeminiInjected = (text) => GEMINI_INJECTED.test(String(text || ""))
+
 export function partText(c) {
   if (c == null) return ""
   if (typeof c === "string") return c

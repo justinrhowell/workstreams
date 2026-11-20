@@ -77,11 +77,16 @@ test("setup keeps other env vars on an existing Gemini ws entry", () => {
   assert.deepEqual(unpinned.env, { FOO: "1" })
 })
 
-test("ws go refuses a tool it can't launch instead of passing Claude's flags", async () => {
-  let r = ws("go", "site", "--tool", "gemini")
-  assert.notEqual(r.status, 0)
-  assert.match(r.stderr, /can't launch gemini yet/)
-  r = ws("go", "site", "--tool", "cursor")
+test("ws go launches each tool with its own flags and refuses unknown tools", async () => {
+  const { launchArgv } = await import("../lib/compose.mjs")
+  assert.deepEqual(launchArgv("claude", "P", { title: "T" }), ["-n", "T", "P"])
+  assert.deepEqual(launchArgv("claude", "P", { resumeId: "s1" }), ["--resume", "s1", "P"])
+  assert.deepEqual(launchArgv("codex", "P"), ["P"])
+  assert.deepEqual(launchArgv("codex", "P", { resumeId: "s1" }), ["resume", "s1", "P"])
+  assert.deepEqual(launchArgv("gemini", "P", { title: "T" }), ["-i", "P"])
+  assert.deepEqual(launchArgv("gemini", "P", { resumeId: "s1" }), ["--resume", "s1", "-i", "P"])
+  assert.throws(() => launchArgv("cursor", "P"), /can't launch cursor/)
+  let r = ws("go", "site", "--tool", "cursor")
   assert.match(r.stderr, /--tool must be one of/)
   r = ws("new", "x-tool", "--title", "X", "--cwd", site, "--tool", "cursor")
   assert.match(r.stderr, /--tool must be one of/)

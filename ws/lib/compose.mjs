@@ -11,6 +11,15 @@ const parseMd = (text) => matter(text, {})
 import { getWorkstream, getProcedure, readOpen, readDecisions, fillVars, variablesIn, tildify, expand } from "./store.mjs"
 import { listProposals } from "./summarize.mjs"
 
+// The command line that starts each tool with the prompt as its first message, or resumes
+// an earlier session with the prompt appended. Gemini resumes by session id (0.70+).
+export function launchArgv(tool, prompt, { resumeId = null, title = "" } = {}) {
+  if (tool === "codex") return resumeId ? ["resume", resumeId, prompt] : [prompt]
+  if (tool === "gemini") return resumeId ? ["--resume", resumeId, "-i", prompt] : ["-i", prompt]
+  if (tool === "claude") return resumeId ? ["--resume", resumeId, prompt] : ["-n", title, prompt]
+  throw new Error(`ws go can't launch ${tool}`)
+}
+
 // Claude names memory dirs after the cwd with every non-alphanumeric char → "-".
 export function claudeProjectSlug(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-")

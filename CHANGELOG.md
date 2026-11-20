@@ -4,6 +4,12 @@ All notable changes to ws. Versions follow [semantic versioning](https://semver.
 
 ## Unreleased
 
+### Added
+- **`ws go --gemini`** (or `tool: gemini`): launches Gemini CLI with the resume prompt (`gemini -i`), and `--resume` continues the last Gemini session by id. Checked against a live Gemini CLI 0.70 session, which also confirmed the start note, the `ws` MCP tools and session logging.
+
+### Fixed
+- Gemini CLI's own `<session_context>` setup message is no longer counted as a user turn or sent to the summarizer as the user's words.
+
 ## 0.2.0 — 2026-11-20
 
 Search, Gemini CLI support (preview), a Linux board service, WSL-only Windows, Node 22+, and fixes from an end-to-end review: input validation, safer resume prompts, broader and faster secret redaction, and board error states.

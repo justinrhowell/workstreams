@@ -809,7 +809,7 @@ async function cmdSync() {
     console.log(`${r.repo}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`)
     for (const n of r.renames || []) console.log(`  renumbered ${n}`)
   }
-  if (bad.length) die(`\nSync stopped for ${bad.map((b) => b.repo).join(", ")}; your local changes are committed and safe. Fix the file(s) named above, then run ws sync again.`)
+  if (bad.length) die(`\nSync stopped for ${bad.map((b) => b.repo).join(", ")}. Nothing was pushed or merged for it, and your files on this machine are unchanged. Fix what's named above, then run ws sync again.`)
 }
 
 async function cmdSyncTimer() {

@@ -152,12 +152,15 @@ export async function ensureRepo(repo) {
   }
   if (repo.remote) {
     const cur = (await git(repo.dir, ["remote", "get-url", "origin"])).stdout.trim()
+    // origin must have exactly one URL, the configured one, and no separate push address: git
+    // pushes to every url and pushurl it has, so anything else left from before sync is cleared.
+    const urls = (await git(repo.dir, ["config", "--get-all", "remote.origin.url"])).stdout.split("\n").filter(Boolean)
     const pushUrl = (await git(repo.dir, ["config", "--get-all", "remote.origin.pushurl"])).stdout.trim()
-    if (cur !== repo.remote || pushUrl) {
+    if (cur !== repo.remote || pushUrl || urls.length !== 1 || urls[0] !== repo.remote) {
       // A new remote (or an `origin` the folder had before sync): forget what the old one had,
       // or an empty new remote would look like shared history and the old history would go out.
       // Removed and added again, so no separate push address of the old one is left behind.
-      if (cur) await git(repo.dir, ["remote", "remove", "origin"], { allowFail: false })
+      if (cur || urls.length) await git(repo.dir, ["remote", "remove", "origin"], { allowFail: false })
       await git(repo.dir, ["remote", "add", "origin", repo.remote], { allowFail: false })
       const refs = (await git(repo.dir, ["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"])).stdout.split("\n").filter(Boolean)
       for (const r of refs) await git(repo.dir, ["update-ref", "-d", r], { allowFail: false })
@@ -325,7 +328,9 @@ export async function syncRepo(repo) {
       // Nothing goes out that ever added one of this machine's own files, even in older local
       // commits the remote doesn't have yet (history from before sync, shared only in part).
       const range = remoteRef ? [`${remoteRef}..HEAD`] : ["HEAD"]
-      const out = (await git(repo.dir, ["log", "--format=", "--name-only", "-z", "--diff-filter=ACMRT", "--no-merges", ...range], { allowFail: false })).stdout.split("\0").map((x) => x.trim()).filter(Boolean)
+      // -m: merge commits too (a file can arrive only in a merge); showRoot: root commits too,
+      // whatever the user's own log settings.
+      const out = (await git(repo.dir, ["-c", "log.showRoot=true", "log", "--format=", "--name-only", "-z", "-m", "--diff-filter=ACMRT", ...range], { allowFail: false })).stdout.split("\0").map((x) => x.trim()).filter(Boolean)
       const leak = out.find((f) => forbiddenPath(f, repo.kind))
       if (leak) {
         return { repo: repo.name, status: "refused", detail: `local history this repo hasn't pushed yet holds ${leak} (${forbiddenPath(leak, repo.kind)}); ws won't publish it. See "Limits" in docs/SYNC.md.` }

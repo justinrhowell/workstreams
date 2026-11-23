@@ -258,6 +258,8 @@ async function queueSummary(job) {
 
 async function captureSessionInner({ tool, session_id, transcript_path, cwd, reason, wsId }) {
   if (!session_id) return { action: "skip", why: "no session id" }
+  // Unattended runs (a scheduled `claude -p` review loop) can opt out: WS_CAPTURE=0.
+  if (process.env.WS_CAPTURE === "0") return { action: "skip", why: "WS_CAPTURE=0" }
   if (transcript_path && /\/subagents\/|\/agent-[^/]*\.jsonl$/.test(transcript_path)) return { action: "skip", why: "subagent" }
   cwd = cwd || process.cwd()
   const list = await store.listWorkstreams({ logs: false }) // matching needs cwd and status only
@@ -289,10 +291,11 @@ async function captureSessionInner({ tool, session_id, transcript_path, cwd, rea
     user_turns: t.userTurns, tool_calls: t.toolCalls, files_touched: t.files.map(store.tildify),
     transcript: transcript_path && store.tildify(transcript_path), end_reason: reason,
   }
+  if (store.LOCAL.enabled) meta.host = store.LOCAL.machine // several machines share this data
 
   if (link) {
     // Two sessions ending at once must not both adopt the same manual log: decide under a lock.
-    const logDir = path.join(store.WS_DIR, link, "log")
+    const logDir = path.join(store.wsDir(link), "log")
     await fs.mkdir(logDir, { recursive: true })
     return store.withLock(path.join(logDir, ".capture"), () => linkSession(link, meta, session_id, t))
   }
@@ -409,7 +412,24 @@ export async function ignoreInbox(entry, { cwd = false } = {}) {
 
 // ------------------------------------------------------------ session start note
 
-export async function startContext({ cwd, wsId }) {
+// A background sync that stopped (a file it couldn't merge) would otherwise go unnoticed:
+// background runs are quiet. Say so at the top of every session until a sync succeeds.
+async function syncWarning() {
+  if (!store.LOCAL.enabled) return ""
+  try {
+    const st = JSON.parse(await fs.readFile(path.join(store.ROOT, ".sync-state.json"), "utf-8"))
+    const bad = (st.results || []).filter((r) => ["conflict", "error"].includes(r.status))
+    if (!bad.length) return ""
+    return `[ws] Sync between machines has stopped since ${String(st.at).slice(0, 16).replace("T", " ")} (${bad.map((r) => `${r.repo}: ${r.detail || r.status}`).join("; ")}). Local changes are safe; tell the user, who can run \`ws sync\` to see what to fix.`
+  } catch { return "" }
+}
+
+export async function startContext(ctx) {
+  const [note, warn] = await Promise.all([startContextInner(ctx), syncWarning()])
+  return [warn, note].filter(Boolean).join("\n")
+}
+
+async function startContextInner({ cwd, wsId }) {
   const list = await store.listWorkstreams({ logs: false })
   const { link, candidates } = matchWorkstream(list, cwd || process.cwd(), wsId)
   if (link) {

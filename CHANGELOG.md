@@ -4,6 +4,13 @@ All notable changes to ws. Versions follow [semantic versioning](https://semver.
 
 ## Unreleased
 
+### Added
+- **`ws sync`: the same workstreams on several machines** ([docs/SYNC.md](docs/SYNC.md)). The data folder syncs through a git remote you control. Records (`open.md`, `decisions.md`, `WORKSTREAM.md`) merge item by item through a merge driver, so two machines adding items at once never leave conflict markers: the same new ID on both is renumbered and reported, and closes and supersedes are never undone. Syncs run in the background after writes and at session start; `ws sync --install` adds a 2-minute timer. Off until `config.json` sets `sync.remote` or `sync.shares`.
+- **Shares:** workstreams whose ids match a share's patterns live in their own repo (`shares/<name>/`), so a machine can sync some workstreams without the rest.
+- **`paths` in config.json** maps a folder stored by another machine to this machine's, for session matching and sources. A source whose folder doesn't exist on this machine is listed in the resume prompt as "not on this machine" (with sync set up) instead of failing it.
+- With sync set up, logs and inbox entries record the machine (`host:`), and manual log names include it.
+- `WS_CAPTURE=0` leaves a session out of capture (for scheduled, unattended agent runs).
+
 Fixes from a cross-model (Codex) end-to-end review of 0.2.1.
 
 ### Fixed

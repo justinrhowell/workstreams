@@ -1,6 +1,6 @@
 // Builds a resume prompt from the fact owners in docs/ARCHITECTURE.md. Fails loudly on any pointer
 // that doesn't resolve, rather than quietly dropping it.
-import { promises as fs } from "node:fs"
+import { promises as fs, existsSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import matter from "gray-matter"
@@ -8,7 +8,7 @@ import matter from "gray-matter"
 // gray-matter caches parses by text and shares the data object; mutating it poisons
 // later reads of identical text. Passing options disables the cache.
 const parseMd = (text) => matter(text, {})
-import { getWorkstream, getProcedure, readOpen, readDecisions, fillVars, variablesIn, tildify, expand } from "./store.mjs"
+import { getWorkstream, getProcedure, readOpen, readDecisions, fillVars, variablesIn, tildify, expand, LOCAL } from "./store.mjs"
 import { listProposals } from "./summarize.mjs"
 
 // The command line that starts each tool with the prompt as its first message, or resumes
@@ -90,8 +90,14 @@ export async function stalePathsIn(file) {
 
 /** @param {string} id @param {{ tool?: string, inline?: boolean }} [opts] */
 export async function compose(id, { tool, inline = false } = {}) {
-  const ws = await getWorkstream(id)
-  tool = tool || ws.tool
+  const full = await getWorkstream(id)
+  tool = tool || full.tool
+  // With data synced across machines, a source (or the project folder) can live on another
+  // machine: its folder doesn't exist here at all. That is listed in the prompt rather than
+  // failing it; a missing file in a folder that does exist is still a broken pointer.
+  const away = (p) => LOCAL.enabled && !!p && !existsSync(path.dirname(p))
+  const elsewhere = full.sources.filter((s) => away(s.path))
+  const ws = { ...full, sources: full.sources.filter((s) => !away(s.path)), cwd: away(full.cwd) ? null : full.cwd }
   const problems = await checkSources(ws)
   if (problems.length) {
     throw new Error(`Can't compose ${id}:\n  - ${problems.join("\n  - ")}\nFix the pointers (ws doctor ${id}).`)
@@ -123,6 +129,9 @@ export async function compose(id, { tool, inline = false } = {}) {
 
   const parts = [`Continuing ${ws.title}.${ws.brief ? " " + ws.brief : ""}`]
   if (read.length) parts.push(`Read these first:\n${read.join("\n")}`)
+  if (elsewhere.length || (full.cwd && !ws.cwd)) {
+    parts.push(`Not on this machine (${LOCAL.machine}), so skipped:\n${[...(full.cwd && !ws.cwd ? [`- the project folder ${tildify(full.cwd)}`] : []), ...elsewhere.map((s) => `- ${tildify(s.path)}${s.role ? ` (${s.role})` : ""}`)].join("\n")}`)
+  }
   // Only the input slot and procedure are templates. Items, decisions, the brief and logs
   // are free text, so a literal {{ … }} there (Liquid, Jinja) is left alone.
   const templated = [fillVars(ws.input, vars)]
@@ -173,5 +182,5 @@ export async function compose(id, { tool, inline = false } = {}) {
   if (included.length) parts.push(`## Included files\n\n${included.join("\n\n")}`)
 
   const text = parts.join("\n\n") + "\n"
-  return { ws, tool, text }
+  return { ws: full, tool, text }
 }

@@ -71,6 +71,27 @@ export function validateConfig(raw) {
       }
     }
   }
+  // sync and paths are read by the store itself (store.LOCAL); here they are only checked,
+  // so a typo is reported instead of silently leaving sync off.
+  if (raw.sync !== undefined) {
+    if (!isObj(raw.sync)) problems.push("sync must be an object")
+    else {
+      const s = raw.sync
+      if (s.remote !== undefined && (typeof s.remote !== "string" || !s.remote.trim())) problems.push("sync.remote must be a git URL or path")
+      if (s.machine !== undefined && !(typeof s.machine === "string" && LABEL.test(s.machine))) problems.push("sync.machine may only contain letters, digits, '.', '_' and '-'")
+      if (s.auto !== undefined && typeof s.auto !== "boolean") problems.push("sync.auto must be true or false")
+      if (s.shares !== undefined) {
+        if (!Array.isArray(s.shares)) problems.push("sync.shares must be a list")
+        else s.shares.forEach((sh, i) => {
+          if (!isObj(sh) || !LABEL.test(sh.name || "")) problems.push(`sync.shares[${i}].name may only contain letters, digits, '.', '_' and '-'`)
+          else if (!Array.isArray(sh.match) || !sh.match.length || !sh.match.every((m) => typeof m === "string" && /^[a-z0-9*][a-z0-9*-]*$/.test(m))) problems.push(`sync.shares[${i}].match must list workstream ids or patterns like "clinic-*"`)
+          else if (sh.remote !== undefined && typeof sh.remote !== "string") problems.push(`sync.shares[${i}].remote must be a git URL or path`)
+        })
+      }
+      for (const k of Object.keys(s)) if (!["remote", "machine", "auto", "shares"].includes(k)) problems.push(`sync.${k} isn't a setting; ignoring it`)
+    }
+  }
+  if (raw.paths !== undefined && (!isObj(raw.paths) || !Object.values(raw.paths).every((v) => typeof v === "string" && v))) problems.push("paths must map a stored path to this machine's path, both strings")
   return { ...out, problems }
 }
 

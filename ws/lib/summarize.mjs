@@ -564,7 +564,7 @@ export async function processJob(job, cfg) {
   if (digest.length < 200) return { skipped: "digest too short" }
   const { model, content } = await callModel(cfg, ws, openItems, digest, decided)
   const proposal = validateProposal(content, openItems, digest, decided)
-  const dir = path.join(PROPOSALS_DIR, job.ws)
+  const dir = store.proposalsDir(job.ws)
   await fs.mkdir(dir, { recursive: true })
   const file = path.join(dir, `${store.sessionTag(job.session)}.md`)
   const data = { ws: job.ws, session: job.session, tool: job.tool, log: job.log, model, created: new Date().toISOString(), close: proposal.close, add: proposal.add, unverified: proposal.unverified, decide: proposal.decide }
@@ -719,14 +719,18 @@ export async function listProposals(wsId, { broken } = {}) {
   const out = []
   let dirs = []
   if (wsId !== undefined && wsId !== null && !store.isId(wsId)) return []
-  try { dirs = wsId ? [wsId] : await fs.readdir(PROPOSALS_DIR) } catch { return [] }
+  if (wsId) dirs = [wsId]
+  else for (const root of store.proposalRoots()) {
+    // Only folders where the id says its drafts live (a share or the main folder).
+    try { for (const d of await fs.readdir(root)) if (store.isId(d) && !dirs.includes(d) && path.dirname(store.proposalsDir(d)) === root) dirs.push(d) } catch {}
+  }
   for (const d of dirs) {
     if (!store.isId(d)) continue
     let files = []
     // ".md.accepting" is an accept that was interrupted: listed so it can be finished.
-    try { files = (await fs.readdir(path.join(PROPOSALS_DIR, d))).filter((f) => f.endsWith(".md") || f.endsWith(".md.accepting")).sort() } catch { continue }
+    try { files = (await fs.readdir(store.proposalsDir(d))).filter((f) => f.endsWith(".md") || f.endsWith(".md.accepting")).sort() } catch { continue }
     for (const f of files) {
-      const file = path.join(PROPOSALS_DIR, d, f)
+      const file = path.join(store.proposalsDir(d), f)
       let text
       try { text = await fs.readFile(file, "utf-8") } catch { continue } // accepted meanwhile
       // An empty claim was left by an accept in ws 0.2.1 or earlier that died right after reserving its name: nothing to show.
@@ -879,12 +883,12 @@ async function applyProposal(p, { close = true, add = true, summary = true, unve
   return applied
 }
 
-// Only ever deletes a draft file inside PROPOSALS_DIR/<id>/.
+// Only ever deletes a draft file inside the proposals folder of its own workstream.
 function proposalFile(p) {
-  const rel = path.relative(PROPOSALS_DIR, path.resolve(String(p?.file || "")))
-  const [dir, name, ...rest] = rel.split(path.sep)
-  if (rest.length || !store.isId(dir) || !/\.md(\.accepting)?$/.test(name || "")) throw new Error("not a proposal file")
-  return path.join(PROPOSALS_DIR, dir, name)
+  const full = path.resolve(String(p?.file || ""))
+  const dir = path.basename(path.dirname(full)), name = path.basename(full)
+  if (!store.isId(dir) || !/\.md(\.accepting)?$/.test(name) || path.dirname(full) !== store.proposalsDir(dir)) throw new Error("not a proposal file")
+  return path.join(store.proposalsDir(dir), name)
 }
 
 // Deletes the draft only if it is still the one the reviewer saw (`fingerprint`, from

@@ -66,6 +66,10 @@ A local web view of every workstream: columns by status, staleness, the inbox, s
 | Summarizer | `ws/lib/summarize.mjs` | Optional. Drafts notes for sessions that ended without any, using an OpenAI-compatible chat model (self-hosted, or hosted with `llm.model` and an API key). Nothing applies until you accept it |
 | Board | Next.js app in this folder | Local web view (above) |
 
+## Several machines
+
+`ws sync` keeps the data the same on a laptop, a workstation and a server you drive from your phone, through a git remote you control, merging items one by one so machines working at the same time don't collide. It can also sync only some workstreams to a machine. See [docs/SYNC.md](docs/SYNC.md).
+
 ## Configuration
 
 Your data lives in `$WS_ROOT`, which defaults to `$XDG_DATA_HOME/ws` or `~/.local/share/ws`. It is never inside this repo. Optional settings go in `$WS_ROOT/config.json`. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every setting and environment variable.

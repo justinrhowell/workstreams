@@ -7,6 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
 import * as store from "../lib/store.mjs"
+import * as sync from "../lib/sync.mjs"
 import { platformProblem } from "../lib/platform.mjs"
 import { compose } from "../lib/compose.mjs"
 import * as capture from "../lib/capture.mjs"
@@ -14,7 +15,10 @@ import { search, formatResult, KINDS } from "../lib/search.mjs"
 
 const text = (value) => ({ content: [{ type: "text", text: value }] })
 const fail = (e) => ({ content: [{ type: "text", text: `Error: ${e.message}` }], isError: true })
-const safe = (fn) => async (args) => { try { return await fn(args) } catch (e) { return fail(e) } }
+// After a call that wrote something, share it with the other machines a few seconds later
+// (one sync for a burst of calls); a no-op unless sync is set up in config.json.
+const afterWrite = () => { if (store.isDirty()) { store.clearDirty(); try { sync.kick({ delayMs: 3000 }) } catch {} } }
+const safe = (fn) => async (args) => { try { return await fn(args) } catch (e) { return fail(e) } finally { afterWrite() } }
 const id = z.string().regex(store.ID_RE, "ids are lowercase letters, digits and dashes").describe("Workstream id, e.g. acme-site (see ws_list)")
 
 if (platformProblem() || store.ROOT_PROBLEM) {

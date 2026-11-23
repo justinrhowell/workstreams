@@ -17,7 +17,8 @@ const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "ws-sync-test-"))
 const gitEnv = { GIT_CONFIG_GLOBAL: path.join(tmp, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" }
 // Settings a user might have globally that must not break background syncs: signing (with a
 // signer that always fails) and fast-forward-only merges.
-await fs.writeFile(gitEnv.GIT_CONFIG_GLOBAL, "[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n[merge]\n\tff = only\n")
+// An identity too: CI machines have none, and the raw commits the tests make need one.
+await fs.writeFile(gitEnv.GIT_CONFIG_GLOBAL, "[user]\n\tname = ws test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n[merge]\n\tff = only\n")
 
 function git(dir, ...args) {
   const r = spawnSync("git", ["-c", "commit.gpgsign=false", "-c", "merge.ff=true", ...args], { cwd: dir, encoding: "utf-8", env: { ...process.env, ...gitEnv } })

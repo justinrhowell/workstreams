@@ -34,8 +34,8 @@ const RECORD_FILES = ["open.md", "decisions.md", "WORKSTREAM.md"]
 // temp files, the trash, eval copies of transcripts, sync's own state, and (in the main repo)
 // the shares, which are repos of their own.
 const LOCAL_FILES = [".sync-renames.log", ".sync-state.json", "sync-problems.log"]
-const IGNORE_MAIN = ["config.json", "config.json.bak*", "queue/", "shares/", "*.lock/", "*.takeover/", "*.tmp", "hook-errors.log", "eval/transcripts/", "eval/reports/", ".trash/", ...LOCAL_FILES]
-const IGNORE_SHARE = ["config.json", "queue/", "*.lock/", "*.takeover/", "*.tmp", ...LOCAL_FILES]
+const IGNORE_MAIN = ["config.json", "config.json.bak*", "queue/", "shares/", "*.lock/", "*.takeover/", "*.tmp", "hook-errors.log", "eval/transcripts/", "eval/reports/", ".trash/", ".DS_Store", ...LOCAL_FILES]
+const IGNORE_SHARE = ["config.json", "queue/", "*.lock/", "*.takeover/", "*.tmp", ".DS_Store", ...LOCAL_FILES]
 // Line lists merge as a union: two machines each adding a line is not a conflict.
 const ATTRIBUTES = [...RECORD_FILES.map((f) => `ws/*/${f} merge=ws`), ".gitignore merge=union", ".gitattributes merge=union", "ignore.txt merge=union"]
 
@@ -63,6 +63,20 @@ export function forbidden(rel, kind) {
   if (parts[0] === ".trash") return "the trash"
   if (rel.startsWith("eval/transcripts/") || rel.startsWith("eval/reports/")) return "eval copies"
   if (["hook-errors.log", ...LOCAL_FILES].includes(rel)) return "sync state"
+  if (base === ".ds_store") return "a Finder file"
+  return null
+}
+
+// A path is checked at every level: "config.json/x" would turn this machine's settings file
+// into a folder, so the protected name anywhere along the path is enough to refuse it.
+export function forbiddenPath(rel, kind) {
+  const parts = rel.split("/")
+  for (let i = 1; i <= parts.length; i++) {
+    const p = parts.slice(0, i).join("/")
+    if (i < parts.length && [".gitignore", ".gitattributes"].includes(fold(p))) return "git metadata"
+    const why = forbidden(p, kind)
+    if (why) return why
+  }
   return null
 }
 
@@ -138,11 +152,13 @@ export async function ensureRepo(repo) {
   }
   if (repo.remote) {
     const cur = (await git(repo.dir, ["remote", "get-url", "origin"])).stdout.trim()
-    if (cur !== repo.remote) {
+    const pushUrl = (await git(repo.dir, ["config", "--get-all", "remote.origin.pushurl"])).stdout.trim()
+    if (cur !== repo.remote || pushUrl) {
       // A new remote (or an `origin` the folder had before sync): forget what the old one had,
       // or an empty new remote would look like shared history and the old history would go out.
-      if (!cur) await git(repo.dir, ["remote", "add", "origin", repo.remote], { allowFail: false })
-      else await git(repo.dir, ["remote", "set-url", "origin", repo.remote], { allowFail: false })
+      // Removed and added again, so no separate push address of the old one is left behind.
+      if (cur) await git(repo.dir, ["remote", "remove", "origin"], { allowFail: false })
+      await git(repo.dir, ["remote", "add", "origin", repo.remote], { allowFail: false })
       const refs = (await git(repo.dir, ["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"])).stdout.split("\n").filter(Boolean)
       for (const r of refs) await git(repo.dir, ["update-ref", "-d", r], { allowFail: false })
     }
@@ -191,7 +207,7 @@ async function checkIncoming(repo, ref) {
     if (mode === "120000") problems.push(`${rel} is a symlink`)
     else if (mode === "160000") problems.push(`${rel} is a submodule`)
     else {
-      const why = forbidden(rel, repo.kind)
+      const why = forbiddenPath(rel, repo.kind)
       if (why) problems.push(`${rel} is ${why}`)
     }
   }
@@ -208,11 +224,18 @@ async function checkIncoming(repo, ref) {
   }
   // An incoming file must not land on a file this machine has outside git (its settings, a
   // queued job, anything ignored or untracked), under any spelling the disk treats as the same.
-  const local = new Map((await git(repo.dir, ["ls-files", "-o", "-z"])).stdout.split("\0").filter(Boolean).map((f) => [fold(f), f]))
-  const tracked = new Set((await git(repo.dir, ["ls-files", "-z"])).stdout.split("\0").filter(Boolean).map(fold))
+  // That includes a file landing where this machine has a folder of its own files, and a folder
+  // landing where it has a file (git would delete the local one to make room). Fails closed.
+  const tracked = new Set((await git(repo.dir, ["ls-files", "-z"], { allowFail: false })).stdout.split("\0").filter(Boolean).map(fold))
+  const local = new Map((await git(repo.dir, ["ls-files", "-o", "-z"], { allowFail: false })).stdout.split("\0").filter(Boolean)
+    .filter((f) => !tracked.has(fold(f))).map((f) => [fold(f), f]))
+  const localDirs = new Map()
+  for (const [k, f] of local) { const ps = k.split("/"); for (let i = 1; i < ps.length; i++) localDirs.set(ps.slice(0, i).join("/"), f) }
   for (const { path: rel } of await entries(repo.dir, ref)) {
     const k = fold(rel)
-    if (local.has(k) && !tracked.has(k)) problems.push(`${rel} would replace this machine's own ${local.get(k)}`)
+    const ps = k.split("/")
+    const hit = local.get(k) || localDirs.get(k) || ps.slice(0, -1).map((_, i) => local.get(ps.slice(0, i + 1).join("/"))).find(Boolean)
+    if (hit) problems.push(`${rel} would replace this machine's own ${hit}`)
   }
   const allowed = new Set(ATTRIBUTES)
   for (const line of (attrs || "").split("\n")) {
@@ -226,7 +249,7 @@ async function commitAll(repo) {
   if (mergeInProgress(repo) || (await unmerged(repo))) throw new Error(`a merge is unfinished in ${store.tildify(repo.dir)}; run \`git merge --abort\` there`)
   await git(repo.dir, ["add", "-A"], { allowFail: false })
   // Whatever .gitignore says: this machine's own files and links never leave it.
-  const drop = (await entries(repo.dir, null)).filter((e) => e.mode === "120000" || e.mode === "160000" || forbidden(e.path, repo.kind)).map((e) => e.path)
+  const drop = (await entries(repo.dir, null)).filter((e) => e.mode === "120000" || e.mode === "160000" || forbiddenPath(e.path, repo.kind)).map((e) => e.path)
   if (drop.length) await git(repo.dir, ["rm", "-q", "--cached", "--", ...drop], { allowFail: false })
   const staged = await git(repo.dir, ["diff", "--cached", "--quiet"])
   if (staged.code === 0) return false
@@ -299,6 +322,14 @@ export async function syncRepo(repo) {
         if (await isAncestor(repo.dir, "HEAD", remoteRef)) return { repo: repo.name, status: "up-to-date" }
       } else if (!haveHead) return { repo: repo.name, status: "up-to-date" } // nothing anywhere yet
       else await startFresh(repo) // first push to an empty remote
+      // Nothing goes out that ever added one of this machine's own files, even in older local
+      // commits the remote doesn't have yet (history from before sync, shared only in part).
+      const range = remoteRef ? [`${remoteRef}..HEAD`] : ["HEAD"]
+      const out = (await git(repo.dir, ["log", "--format=", "--name-only", "-z", "--diff-filter=ACMRT", "--no-merges", ...range], { allowFail: false })).stdout.split("\0").map((x) => x.trim()).filter(Boolean)
+      const leak = out.find((f) => forbiddenPath(f, repo.kind))
+      if (leak) {
+        return { repo: repo.name, status: "refused", detail: `local history this repo hasn't pushed yet holds ${leak} (${forbiddenPath(leak, repo.kind)}); ws won't publish it. See "Limits" in docs/SYNC.md.` }
+      }
       const p = await git(repo.dir, ["push", "-q", "--no-verify", "origin", `HEAD:${BRANCH}`], { timeout: 60_000 })
       if (p.code === 0) return { repo: repo.name, status: "pushed" }
       if (!/rejected|non-fast-forward|fetch first/i.test(p.stderr)) return { repo: repo.name, status: "offline", detail: p.stderr.trim().split("\n").pop() }
@@ -324,7 +355,16 @@ async function mergeIncoming(repo, remoteRef, haveHead) {
     ? d.stdout.split("\0").filter(Boolean)
     : (await git(repo.dir, ["ls-tree", "-r", "-z", "--name-only", "--full-tree", remoteRef])).stdout.split("\0").filter(Boolean)
   // A workstream folder that only exists on the other side has no local writer to hold off.
-  const locks = changed.filter((f) => RECORD_FILES.includes(path.basename(f))).map((f) => path.join(repo.dir, f)).filter((f) => existsSync(path.dirname(f)))
+  // Every local file the merge can change is locked (the record files, and the per-session
+  // files: logs, drafts and inbox rows, which ws also rewrites under their own locks), plus each
+  // log folder's capture lock.
+  const locks = []
+  for (const f of changed) {
+    const full = path.join(repo.dir, f)
+    if (!existsSync(path.dirname(full))) continue
+    if (RECORD_FILES.includes(path.basename(f)) || existsSync(full)) locks.push(full)
+    if (/^ws\/[^/]+\/log\//.test(f)) locks.push(path.join(path.dirname(full), ".capture"))
+  }
   return withRecordLocks(locks, async () => {
     await commitAll(repo) // anything written since the first commit, now that writers are held off
     await fs.rm(path.join(repo.dir, ".sync-renames.log"), { force: true })

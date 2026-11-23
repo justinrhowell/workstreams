@@ -393,6 +393,10 @@ test("incoming symlinks, machine-local files and un-ignore rules are refused bef
     ["unignore", { ".gitignore": "!config.json\n" }, /\.gitignore has/],
     ["ignore-extra", { ".gitignore": "*.md\n" }, /\.gitignore has/],
     ["non-ascii", { "ws/l/caf\u00e9.md": { index: "x\n" } }, /plain-ASCII/],
+    ["dir-over-config", { "config.json/x": { index: "{}" } }, /settings/],
+    ["dir-over-state", { ".sync-state.json/x": { index: "{}" } }, /sync state/],
+    ["file-over-local-dir", { "eval": { index: "x\n" } }, /would replace this machine's own/],
+    ["finder", { "ws/l/.DS_Store": { index: "x" } }, /Finder/],
     ["attrs", { "ws/x/.gitattributes": "* merge=union\n" }, /git metadata/],
     ["case-config", { "Config.JSON": { index: "{}" } }, /settings/],
     ["case-queue", { "Queue/job.json": { index: "{}" } }, /queue/],
@@ -403,6 +407,8 @@ test("incoming symlinks, machine-local files and un-ignore rules are refused bef
     const remote = await bare(`refuse-${name}`)
     const a = await machine(`ref-${name}`, { remote })
     a.okWs("new", "l", "--title", "L", "--cwd", proj, "--prefix", "L")
+    await fs.mkdir(path.join(a.root, "eval", "transcripts"), { recursive: true })
+    await fs.writeFile(path.join(a.root, "eval", "transcripts", "t.jsonl"), "{}\n")
     a.okWs("sync")
     const before = await a.read("config.json")
     await pushRaw(remote, name, files)
@@ -415,6 +421,7 @@ test("incoming symlinks, machine-local files and un-ignore rules are refused bef
     assert.equal(await fs.readFile(outside, "utf-8"), "keep me\n", `${name}: wrote outside the data folder`)
     assert.ok(!(await fs.lstat(path.join(a.root, "ws/l/open.md"))).isSymbolicLink())
     assert.match(await a.read("ws/l/open.md"), /L-1 local item/)
+    assert.ok((await fs.stat(path.join(a.root, "eval", "transcripts", "t.jsonl"))).isFile(), `${name}: local eval copy lost`)
   }
 })
 
@@ -499,4 +506,37 @@ test("a folder that had another remote before sync doesn't send its history to t
   assert.match(a.okWs("sync"), /main: pushed/)
   assert.equal(git(tmp, "--git-dir", remote, "rev-list", "--count", "main").out.trim(), "1")
   assert.equal(git(tmp, "--git-dir", remote, "log", "--all", "--format=%H", "--", "secret-old.md").out.trim(), "")
+})
+
+test("older local commits the hub doesn't have yet can't publish machine-local files", async () => {
+  const remote = await bare("partial")
+  const root = path.join(tmp, "partial-a")
+  await fs.mkdir(root, { recursive: true })
+  git(root, "init", "-q", "-b", "main")
+  await fs.writeFile(path.join(root, "ignore.txt"), "/x\n")
+  git(root, "add", "-A"); git(root, "commit", "-qm", "shared")
+  git(root, "remote", "add", "origin", remote); git(root, "push", "-q", "origin", "HEAD:main"); git(root, "fetch", "-q", "origin")
+  await fs.mkdir(path.join(root, "eval", "transcripts"), { recursive: true })
+  await fs.writeFile(path.join(root, "eval", "transcripts", "t.jsonl"), "private\n")
+  git(root, "add", "-A", "-f"); git(root, "commit", "-qm", "private copy")
+  git(root, "rm", "-q", "-r", "--cached", "eval"); git(root, "commit", "-qm", "untracked again")
+  const a = await machine("partial-a", { remote })
+  a.okWs("new", "p", "--title", "P", "--cwd", proj)
+  const r = a.ws("sync")
+  assert.notEqual(r.code, 0)
+  assert.match(r.out, /main: refused \(local history/)
+  assert.equal(git(tmp, "--git-dir", remote, "log", "--all", "--format=%H", "--", "eval").out.trim(), "")
+})
+
+test("a separate push address left on origin is cleared; pushes reach the configured remote", async () => {
+  const old = await bare("pushurl-old")
+  const remote = await bare("pushurl-new")
+  const a = await machine("pushurl-a", { remote })
+  git(a.root, "init", "-q", "-b", "main")
+  git(a.root, "remote", "add", "origin", remote)
+  git(a.root, "config", "remote.origin.pushurl", old)
+  a.okWs("new", "u", "--title", "U", "--cwd", proj)
+  assert.match(a.okWs("sync"), /main: pushed/)
+  assert.equal(git(tmp, "--git-dir", remote, "rev-list", "--count", "main").out.trim(), "1")
+  assert.notEqual(git(tmp, "--git-dir", old, "rev-parse", "-q", "--verify", "main").code, 0, "nothing went to the old push address")
 })

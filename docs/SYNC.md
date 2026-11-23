@@ -98,20 +98,28 @@ listed in the resume prompt as "not on this machine" instead of failing it.
 ## Limits
 
 - **Names are plain ASCII.** Sync carries only files whose names are printable ASCII (everything
-  ws writes is); a remote with other names is refused. Disks fold more than ASCII case, so ws
+  ws writes is); a remote with other names is refused, and local files with other names (say a
+  screenshot dropped into a workstream folder) stay on that machine. Finder's `.DS_Store` files
+  are never synced. Disks fold more than ASCII case, so ws
   can't otherwise be sure two names are different files.
 - **Rule files are ws's own.** `.gitignore` and `.gitattributes` may only hold the rules ws writes;
   edit `ignore.txt` (folders whose sessions are dropped) instead.
 - **Per-session files edited on two machines at once.** Only `open.md`, `decisions.md` and
-  `WORKSTREAM.md` are merged record by record under ws's locks. Session logs, inbox entries and
-  drafts are one file per session; if the same one is edited on two machines between syncs (for
+  `WORKSTREAM.md` are merged record by record. Session logs, inbox entries and drafts are one file
+  per session; a merge holds ws's locks on every local file it changes, so a write on this machine
+  isn't lost to it, but if the same per-session file is edited on two machines between syncs (for
   example a draft accepted on both), sync stops on that file rather than guessing.
+- **A data folder with its own older git history.** If commits from before sync ever added a file
+  ws never syncs (an old `config.json`, eval transcripts), sync refuses to push them (`refused:
+  local history ... holds ...`). Start that folder's history over: move its `.git` folder aside and
+  run `ws sync` again.
 - **Joining with existing data, or moving the hub.** A machine's first sync replaces its own git
   history with one commit, so nothing old is published. Two machines that each start that way
   share no history, so their first merge can't tell which side changed what: same-ID records are
   renumbered and a field changed on one side may lose to the other. Start new machines with an
-  empty data folder (they take everything from the remote), and to move to a new hub, push from
-  one machine and let the others start empty.
+  empty data folder (they take everything from the remote). To move to a new hub: sync every
+  machine to the old hub first, then point one machine at the new hub and sync, then on each other
+  machine move the data folder aside and let it start empty from the new hub.
 
 ## Unattended runs
 

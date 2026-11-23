@@ -33,7 +33,10 @@ set it up, and it needs nothing but git and an SSH-reachable (or local) git remo
    ```
 
    Workstream data can hold client and personal details; prefer your own hardware over a hosted
-   service unless you are sure it may live there.
+   service unless you are sure it may live there. Anyone who can push to the remote can change
+   what your sessions read (open items go into resume prompts), so keep write access to machines
+   you control. For a machine that should reach only one repo, give it its own SSH key with a
+   forced command that allows just `git-upload-pack` / `git-receive-pack` on that repo.
 
 2. **On each machine**, add to `config.json` in the data folder (`ws` prints its path):
 

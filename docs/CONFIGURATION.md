@@ -55,6 +55,20 @@ Tool output is never sent, including the output of `!` shell commands and slash 
 
 **Hosted providers:** set `llm.model` (when `/models` lists more than one model on a non-local host, ws won't guess) and `llm.apiKeyEnv`. A refused key or a wrong URL keeps the job queued and says so (`ws summarize --drain`), instead of spending the job's retries. If your provider wants `max_completion_tokens`, use `"extraBody": {"max_tokens": null, "max_completion_tokens": 1500}`: `null` removes a default field. `extraBody` can't change the model or the messages.
 
+### sync and paths
+
+`sync` (off unless `remote` or `shares` is set) and `paths` are explained in [SYNC.md](SYNC.md):
+
+| Key | Meaning |
+|---|---|
+| `sync.machine` | Name recorded on logs and inbox entries (default: the host name) |
+| `sync.remote` | Git URL or path of the main data repo |
+| `sync.shares` | `[{ "name", "match": ["clinic-*", "billing"], "remote" }]`: workstreams whose ids match live in their own repo |
+| `sync.auto` | `false` stops the background sync after writes (run `ws sync` yourself) |
+| `paths` | `{ "<folder as stored>": "<folder on this machine>" }` |
+
+`config.json` itself is never synced: each machine keeps its own.
+
 ## Environment variables
 
 | Variable | Overrides | Notes |
@@ -67,7 +81,8 @@ Tool output is never sent, including the output of `!` shell commands and slash 
 | `WS_BOARD_LABEL` | `board.label` | Same characters as `board.label`; anything else is ignored |
 | `WS_ID` | folder matching | Set by `ws go`. Forces a session onto that workstream |
 | `WS_DEBUG` | | Hooks print what they decided to stderr |
-| `WS_NO_SPAWN` | | Hooks don't start the background summarizer (used in tests) |
+| `WS_NO_SPAWN` | | Hooks don't start the background summarizer or sync (used in tests) |
+| `WS_CAPTURE` | | `0` leaves the session out of capture (scheduled, unattended agent runs) |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Where Claude Code's settings and transcripts are; `ws setup` writes hooks there |
 | `CODEX_HOME` | `~/.codex` | Same for Codex |
 | `GEMINI_CLI_HOME` | your home folder | Gemini CLI keeps `.gemini/` (settings and transcripts) here |

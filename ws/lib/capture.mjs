@@ -3,14 +3,11 @@
 import { promises as fs, realpathSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
-import matter from "gray-matter"
 
-// gray-matter caches parses by text and shares the data object; mutating it poisons
-// later reads of identical text. Passing options disables the cache.
-const parseMd = (text) => matter(text, {})
 import { codexDir } from "./paths.mjs"
 import { loadGeminiSession, partText, wsToolName, isGeminiInjected } from "./gemini.mjs"
 import * as store from "./store.mjs"
+const { parseMd } = store
 import * as summarize from "./summarize.mjs"
 
 export const INBOX_DIR = path.join(store.ROOT, "inbox")
@@ -176,7 +173,10 @@ export function matchWorkstream(list, cwd, wsId) {
   if (wsId && list.some((w) => w.id === wsId)) return { link: wsId, candidates: [wsId] }
   // A relative cwd (from a hand edit or an older `ws set`) would resolve against the
   // session's own folder and claim every session, so it never matches.
-  const live = list.filter((w) => w.cwd && path.isAbsolute(w.cwd) && ["active", "waiting"].includes(w.status) && under(cwd, w.cwd))
+  // The home folder (or above it) is no project: a workstream set there would claim every
+  // session started anywhere, and with sync its logs would go wherever that workstream syncs.
+  const tooBroad = (dir) => under(os.homedir(), dir)
+  const live = list.filter((w) => w.cwd && path.isAbsolute(w.cwd) && !tooBroad(w.cwd) && ["active", "waiting"].includes(w.status) && under(cwd, w.cwd))
   if (!live.length) return { link: null, candidates: [] }
   const len = (w) => canon(w.cwd).length
   const best = Math.max(...live.map(len))
@@ -237,7 +237,7 @@ async function findAdoptableManualLog(wsId, started, ended, logCalls = []) {
 
 async function writeLogFile(file, data, body) {
   for (const k of Object.keys(data)) if (data[k] == null || (Array.isArray(data[k]) && !data[k].length)) delete data[k]
-  await store.writeFileAtomic(file, matter.stringify(`\n${body.trim()}\n`, data))
+  await store.writeFileAtomic(file, store.stringifyMd(`\n${body.trim()}\n`, data))
 }
 
 export async function captureSession(args) {
@@ -258,6 +258,8 @@ async function queueSummary(job) {
 
 async function captureSessionInner({ tool, session_id, transcript_path, cwd, reason, wsId }) {
   if (!session_id) return { action: "skip", why: "no session id" }
+  // Unattended runs (a scheduled `claude -p` review loop) can opt out: WS_CAPTURE=0.
+  if (process.env.WS_CAPTURE === "0") return { action: "skip", why: "WS_CAPTURE=0" }
   if (transcript_path && /\/subagents\/|\/agent-[^/]*\.jsonl$/.test(transcript_path)) return { action: "skip", why: "subagent" }
   cwd = cwd || process.cwd()
   const list = await store.listWorkstreams({ logs: false }) // matching needs cwd and status only
@@ -289,10 +291,11 @@ async function captureSessionInner({ tool, session_id, transcript_path, cwd, rea
     user_turns: t.userTurns, tool_calls: t.toolCalls, files_touched: t.files.map(store.tildify),
     transcript: transcript_path && store.tildify(transcript_path), end_reason: reason,
   }
+  if (store.LOCAL.enabled) meta.host = store.LOCAL.machine // several machines share this data
 
   if (link) {
     // Two sessions ending at once must not both adopt the same manual log: decide under a lock.
-    const logDir = path.join(store.WS_DIR, link, "log")
+    const logDir = path.join(store.wsDir(link), "log")
     await fs.mkdir(logDir, { recursive: true })
     return store.withLock(path.join(logDir, ".capture"), () => linkSession(link, meta, session_id, t))
   }
@@ -409,7 +412,26 @@ export async function ignoreInbox(entry, { cwd = false } = {}) {
 
 // ------------------------------------------------------------ session start note
 
-export async function startContext({ cwd, wsId }) {
+// A background sync that stopped (a file it couldn't merge) would otherwise go unnoticed:
+// background runs are quiet. Say so at the top of every session until a sync succeeds.
+async function syncWarning() {
+  if (!store.LOCAL.enabled) return ""
+  try {
+    const st = JSON.parse(await fs.readFile(path.join(store.ROOT, ".sync-state.json"), "utf-8"))
+    const bad = (st.results || []).filter((r) => ["conflict", "error", "refused"].includes(r.status))
+    if (!bad.length) return ""
+    // Details can quote file names the remote chose: printable characters only, kept short.
+    const clean = (s) => String(s).replace(/[^\x20-\x7e]/g, "?").slice(0, 200)
+    return `[ws] Sync between machines has stopped since ${clean(st.at).slice(0, 16).replace("T", " ")} (${bad.map((r) => `${clean(r.repo)}: ${clean(r.detail || r.status)}`).join("; ")}). Local changes are safe; tell the user, who can run \`ws sync\` to see what to fix.`
+  } catch { return "" }
+}
+
+export async function startContext(ctx) {
+  const [note, warn] = await Promise.all([startContextInner(ctx), syncWarning()])
+  return [warn, note].filter(Boolean).join("\n")
+}
+
+async function startContextInner({ cwd, wsId }) {
   const list = await store.listWorkstreams({ logs: false })
   const { link, candidates } = matchWorkstream(list, cwd || process.cwd(), wsId)
   if (link) {

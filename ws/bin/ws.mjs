@@ -16,6 +16,7 @@ import { loadConfig } from "../lib/config.mjs"
 import { renderUnit, systemdService } from "../lib/board-service.mjs"
 import { fileURLToPath } from "node:url"
 import { platformProblem, isWsl } from "../lib/platform.mjs"
+import * as sync from "../lib/sync.mjs"
 
 const HELP = `ws: workstream state for Claude Code, Codex and Gemini CLI   (data: ${store.tildify(store.ROOT)})
 
@@ -58,6 +59,9 @@ const HELP = `ws: workstream state for Claude Code, Codex and Gemini CLI   (data
   ws board --rebuild | --status    rebuild after updating ws, then restart; or show service state
   ws board --dev [--port N]        run a dev server in this terminal instead
   ws hook <claude|codex|gemini> <start|end>  hook entry point (reads the hook JSON on stdin; never fails)
+  ws sync [--status] [--quiet]     share the data with your other machines through git (docs/SYNC.md); runs by
+                                   itself after writes once sync is set up in config.json
+  ws sync --install | --uninstall  also sync every 2 minutes in the background (launchd / systemd user timer)
 `
 
 const { values: opt, positionals: args } = parseArgs({
@@ -72,6 +76,7 @@ const { values: opt, positionals: args } = parseArgs({
     port: { type: "string" }, install: { type: "boolean" }, uninstall: { type: "boolean" }, rebuild: { type: "boolean" }, status: { type: "boolean" }, dev: { type: "boolean" }, yes: { type: "boolean", short: "y" }, runs: { type: "string" }, case: { type: "string" }, "confirm-decision": { type: "string" }, "no-decide": { type: "boolean" }, why: { type: "string" }, rejected: { type: "string" }, evidence: { type: "string" }, supersedes: { type: "string" }, requeue: { type: "boolean" }, confirm: { type: "string" }, "no-open": { type: "boolean" }, "no-close": { type: "boolean" }, "no-add": { type: "boolean" }, "no-summary": { type: "boolean" }, days: { type: "string" }, note: { type: "string" }, text: { type: "string" },
     closed: { type: "string" }, added: { type: "string" }, ws: { type: "string" }, kind: { type: "string" }, current: { type: "boolean" }, limit: { type: "string" }, json: { type: "boolean" }, help: { type: "boolean", short: "h" },
     "dry-run": { type: "boolean" }, "no-link": { type: "boolean" }, "no-hooks": { type: "boolean" }, "no-mcp": { type: "boolean" },
+    wait: { type: "string" },
   },
 })
 
@@ -743,11 +748,14 @@ async function cmdHook(tool, event) {
       // Structured output: Codex parses stdout that starts with "[" as JSON; Gemini requires JSON-only stdout. All three accept this form.
       // Retry any queued summaries while we're here (detached; never blocks startup).
       try { if (process.env.WS_NO_SPAWN !== "1" && (await summarize.listQueue()).length && (await summarize.llmConfig())) summarize.spawnDrain() } catch {}
+      // Pick up other machines' changes in the background (never delays the session).
+      try { sync.kick() } catch {}
       const note = await capture.startContext(ctx)
       if (note) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: note } }) + "\n")
     } else if (event === "end") {
       const r = await capture.captureSession(ctx)
       if (process.env.WS_DEBUG) console.error(JSON.stringify(r))
+      try { if (store.isDirty()) sync.kick() } catch {}
     }
   } catch (e) {
     try { await fs.appendFile(path.join(store.ROOT, "hook-errors.log"), `${new Date().toISOString()} ${tool} ${event}: ${e.stack || e}\n`) } catch {}
@@ -762,6 +770,82 @@ const ONLY = {
   search: ["ws", "kind", "current", "limit", "json", "help"],
   setup: ["claude", "codex", "gemini", "dry-run", "no-link", "no-hooks", "no-mcp", "uninstall", "help"],
   board: ["install", "uninstall", "rebuild", "status", "dev", "port", "no-open", "help"],
+  sync: ["status", "quiet", "wait", "install", "uninstall", "json", "help"],
+}
+
+async function cmdSync() {
+  if (opt.install || opt.uninstall) return cmdSyncTimer()
+  if (opt.status) {
+    if (!sync.enabled()) return console.log("Sync isn't set up on this machine (see docs/SYNC.md).")
+    const st = await sync.status()
+    if (opt.json) return console.log(JSON.stringify(st, null, 2))
+    for (const r of st) {
+      console.log(`${bold(r.repo)}  ${store.tildify(r.dir)}  ${r.remote ? `→ ${r.remote}` : dim("(local only)")}`)
+      if (r.state) { console.log(`  ${r.state}`); continue }
+      console.log(`  ${r.pending ? `${r.pending} changed file(s) not yet committed` : "nothing uncommitted"}` +
+        (r.ahead !== null ? ` · ${r.ahead} to push · ${r.behind} to pull` : "") + (r.last ? ` · remote last changed ${r.last}` : ""))
+    }
+    return
+  }
+  if (!sync.enabled()) {
+    if (opt.quiet) return
+    die("Sync isn't set up on this machine: add sync.remote (and optionally sync.shares) to config.json. See docs/SYNC.md.")
+  }
+  const wait = Number(opt.wait || 0)
+  if (wait > 0) await new Promise((r) => setTimeout(r, Math.min(wait, 60) * 1000))
+  const results = await sync.syncAll()
+  const bad = results.filter((r) => sync.BAD.includes(r.status))
+  if (bad.length || results.some((r) => r.renames?.length)) {
+    const line = `${new Date().toISOString()} ${results.map((r) => `${r.repo}:${r.status}${r.detail ? ` (${r.detail})` : ""}${r.renames ? ` renamed ${r.renames.join("; ")}` : ""}`).join(" ")}\n`
+    try {
+      const log = path.join(store.ROOT, "sync-problems.log")
+      try { if ((await fs.lstat(log)).isSymbolicLink()) await fs.rm(log) } catch {}
+      await fs.appendFile(log, line.replace(/[^\x20-\x7e\n]/g, "?"))
+    } catch {}
+  }
+  if (opt.quiet) { if (bad.length) process.exitCode = 1; return }
+  if (opt.json) return console.log(JSON.stringify(results, null, 2))
+  for (const r of results) {
+    console.log(`${r.repo}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`)
+    for (const n of r.renames || []) console.log(`  renumbered ${n}`)
+  }
+  if (bad.length) die(`\nSync stopped for ${bad.map((b) => b.repo).join(", ")}. Nothing was pushed or merged for it, and your files on this machine are unchanged. Fix what's named above, then run ws sync again.`)
+}
+
+async function cmdSyncTimer() {
+  const files = sync.timerFiles()
+  const uid = process.getuid?.()
+  if (opt.uninstall) {
+    if (process.platform === "darwin") for (const d of [`gui/${uid}`, `user/${uid}`]) spawnSync("launchctl", ["bootout", `${d}/${sync.TIMER_LABEL}`], { stdio: "ignore" })
+    else spawnSync("systemctl", ["--user", "disable", "--now", `${sync.TIMER_LABEL}.timer`], { stdio: "ignore" })
+    for (const f of files) await fs.rm(f.file, { force: true })
+    return console.log("Background sync removed.")
+  }
+  if (!sync.enabled()) die("Set up sync in config.json first (docs/SYNC.md).")
+  for (const f of files) { await fs.mkdir(path.dirname(f.file), { recursive: true }); await store.writeFileAtomic(f.file, f.text) }
+  if (process.platform === "darwin") {
+    // The GUI session when someone is logged in at the screen, else the background user domain (an SSH-only account).
+    let ok = false
+    for (const d of [`gui/${uid}`, `user/${uid}`]) {
+      spawnSync("launchctl", ["bootout", `${d}/${sync.TIMER_LABEL}`], { stdio: "ignore" })
+      if (spawnSync("launchctl", ["bootstrap", d, files[0].file], { stdio: "ignore" }).status === 0) { ok = true; console.log(`Background sync every 2 minutes (launchd, ${d}).`); break }
+    }
+    if (!ok) die(`Couldn't load ${files[0].file} with launchctl.`)
+  } else {
+    spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" })
+    const r = spawnSync("systemctl", ["--user", "enable", "--now", `${sync.TIMER_LABEL}.timer`], { stdio: "inherit" })
+    if (r.status !== 0) die("Couldn't enable the systemd user timer (is systemctl --user available? loginctl enable-linger keeps it running after logout).")
+    console.log("Background sync every 2 minutes (systemd user timer ws.sync.timer).")
+  }
+}
+
+async function cmdMergeDriver(rest) {
+  // Called by git with paths, never by people; any failure means "conflict" (exit 1), which
+  // makes the sync abort the merge rather than write a half-merged file.
+  try { process.exit(await sync.runMergeDriver(rest[0], rest[1], rest[2], rest[3] || "")) } catch (e) {
+    console.error(`ws merge-driver: ${e.message}`)
+    process.exit(1)
+  }
 }
 
 try {
@@ -806,7 +890,11 @@ try {
   else if (cmd === "mirror") await cmdMirror(rest[0], rest[1])
   else if (cmd === "inbox") await cmdInbox(rest[0], rest[1], rest[2], rest.slice(3))
   else if (cmd === "hook") await cmdHook(need(rest[0], "claude|codex|gemini"), need(rest[1], "start|end"))
+  else if (cmd === "sync") await cmdSync()
+  else if (cmd === "merge-driver") await cmdMergeDriver(rest)
   else die(`unknown command "${cmd}"\n\n${HELP}`)
+  // Share what this command wrote with the other machines (detached; only when sync is set up).
+  if (cmd !== "sync" && store.isDirty()) sync.kick()
 } catch (e) {
   die(`ws: ${e.message}`)
 }

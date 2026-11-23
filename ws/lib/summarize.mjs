@@ -7,12 +7,9 @@ import path from "node:path"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
-import matter from "gray-matter"
 
-// gray-matter caches parses by text and shares the data object; mutating it poisons
-// later reads of identical text. Passing options disables the cache.
-const parseMd = (text) => matter(text, {})
 import * as store from "./store.mjs"
+const { parseMd } = store
 import { loadConfig } from "./config.mjs"
 import { claudeDir, codexDir, geminiDir } from "./paths.mjs"
 import { loadGeminiSession, partText } from "./gemini.mjs"
@@ -564,7 +561,7 @@ export async function processJob(job, cfg) {
   if (digest.length < 200) return { skipped: "digest too short" }
   const { model, content } = await callModel(cfg, ws, openItems, digest, decided)
   const proposal = validateProposal(content, openItems, digest, decided)
-  const dir = path.join(PROPOSALS_DIR, job.ws)
+  const dir = store.proposalsDir(job.ws)
   await fs.mkdir(dir, { recursive: true })
   const file = path.join(dir, `${store.sessionTag(job.session)}.md`)
   const data = { ws: job.ws, session: job.session, tool: job.tool, log: job.log, model, created: new Date().toISOString(), close: proposal.close, add: proposal.add, unverified: proposal.unverified, decide: proposal.decide }
@@ -577,7 +574,7 @@ export async function processJob(job, cfg) {
   // draft that is being replaced.
   const publish = () => store.withLock(file, async () => {
     if (job.file && job.token && !(await sameJob(job))) return false
-    await store.writeFileAtomic(file, matter.stringify(`\n${proposal.summary}\n`, data))
+    await store.writeFileAtomic(file, store.stringifyMd(`\n${proposal.summary}\n`, data))
     return true
   })
   const published = job.file ? await store.withLock(job.file, publish) : await publish()
@@ -719,14 +716,18 @@ export async function listProposals(wsId, { broken } = {}) {
   const out = []
   let dirs = []
   if (wsId !== undefined && wsId !== null && !store.isId(wsId)) return []
-  try { dirs = wsId ? [wsId] : await fs.readdir(PROPOSALS_DIR) } catch { return [] }
+  if (wsId) dirs = [wsId]
+  else for (const root of store.proposalRoots()) {
+    // Only folders where the id says its drafts live (a share or the main folder).
+    try { for (const d of await fs.readdir(root)) if (store.isId(d) && !dirs.includes(d) && path.dirname(store.proposalsDir(d)) === root) dirs.push(d) } catch {}
+  }
   for (const d of dirs) {
     if (!store.isId(d)) continue
     let files = []
     // ".md.accepting" is an accept that was interrupted: listed so it can be finished.
-    try { files = (await fs.readdir(path.join(PROPOSALS_DIR, d))).filter((f) => f.endsWith(".md") || f.endsWith(".md.accepting")).sort() } catch { continue }
+    try { files = (await fs.readdir(store.proposalsDir(d))).filter((f) => f.endsWith(".md") || f.endsWith(".md.accepting")).sort() } catch { continue }
     for (const f of files) {
-      const file = path.join(PROPOSALS_DIR, d, f)
+      const file = path.join(store.proposalsDir(d), f)
       let text
       try { text = await fs.readFile(file, "utf-8") } catch { continue } // accepted meanwhile
       // An empty claim was left by an accept in ws 0.2.1 or earlier that died right after reserving its name: nothing to show.
@@ -797,7 +798,7 @@ export async function acceptProposal(p, opts = {}) {
       await fn()
       done.add(key)
       cur.data.applied_steps = [...done]
-      await store.writeFileAtomic(claimed, matter.stringify(`\n${cur.content.trim()}\n`, cur.data))
+      await store.writeFileAtomic(claimed, store.stringifyMd(`\n${cur.content.trim()}\n`, cur.data))
     }
     try {
       // Apply what the claimed file says (identity checked above), not a possibly stale listing.
@@ -872,19 +873,19 @@ async function applyProposal(p, { close = true, add = true, summary = true, unve
         if (p.model) data.summary_model = String(p.model) // YAML can't hold undefined
         if (applied.closed.length) data.closed = applied.closed
         if (applied.added.length) data.added = applied.added
-        await store.writeFileAtomic(p.log, matter.stringify(`\n${p.summary}\n`, data))
+        await store.writeFileAtomic(p.log, store.stringifyMd(`\n${p.summary}\n`, data))
       })
     })
   }
   return applied
 }
 
-// Only ever deletes a draft file inside PROPOSALS_DIR/<id>/.
+// Only ever deletes a draft file inside the proposals folder of its own workstream.
 function proposalFile(p) {
-  const rel = path.relative(PROPOSALS_DIR, path.resolve(String(p?.file || "")))
-  const [dir, name, ...rest] = rel.split(path.sep)
-  if (rest.length || !store.isId(dir) || !/\.md(\.accepting)?$/.test(name || "")) throw new Error("not a proposal file")
-  return path.join(PROPOSALS_DIR, dir, name)
+  const full = path.resolve(String(p?.file || ""))
+  const dir = path.basename(path.dirname(full)), name = path.basename(full)
+  if (!store.isId(dir) || !/\.md(\.accepting)?$/.test(name) || path.dirname(full) !== store.proposalsDir(dir)) throw new Error("not a proposal file")
+  return path.join(store.proposalsDir(dir), name)
 }
 
 // Deletes the draft only if it is still the one the reviewer saw (`fingerprint`, from

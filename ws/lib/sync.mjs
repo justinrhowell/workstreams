@@ -43,7 +43,12 @@ const ATTRIBUTES = [...RECORD_FILES.map((f) => `ws/*/${f} merge=ws`), ".gitignor
 // Compared case-folded and Unicode-normalized: on a case-insensitive disk (macOS) "Config.json"
 // is config.json.
 export const fold = (s) => String(s).normalize("NFC").toLowerCase()
+// Sync carries plain-ASCII names only. Disks fold more than ASCII case (macOS treats some
+// non-ASCII letters as equal to ASCII ones), so with non-ASCII names no comparison here could
+// be sure two names are different files. ws's own names are always ASCII.
+const ASCII_NAME = /^[\x20-\x7e]+$/
 export function forbidden(rel, kind) {
+  if (!rel.split("/").every((p) => ASCII_NAME.test(p) && p !== "." && p !== "..")) return "not a plain-ASCII name"
   if (rel === ".gitignore" || rel === ".gitattributes") return null
   if ([".gitignore", ".gitattributes"].includes(fold(rel))) return "a case variant of a git file"
   rel = fold(rel)
@@ -133,8 +138,14 @@ export async function ensureRepo(repo) {
   }
   if (repo.remote) {
     const cur = (await git(repo.dir, ["remote", "get-url", "origin"])).stdout.trim()
-    if (!cur) await git(repo.dir, ["remote", "add", "origin", repo.remote], { allowFail: false })
-    else if (cur !== repo.remote) await git(repo.dir, ["remote", "set-url", "origin", repo.remote], { allowFail: false })
+    if (cur !== repo.remote) {
+      // A new remote (or an `origin` the folder had before sync): forget what the old one had,
+      // or an empty new remote would look like shared history and the old history would go out.
+      if (!cur) await git(repo.dir, ["remote", "add", "origin", repo.remote], { allowFail: false })
+      else await git(repo.dir, ["remote", "set-url", "origin", repo.remote], { allowFail: false })
+      const refs = (await git(repo.dir, ["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"])).stdout.split("\n").filter(Boolean)
+      for (const r of refs) await git(repo.dir, ["update-ref", "-d", r], { allowFail: false })
+    }
   }
   if ((await git(repo.dir, ["config", "--local", "--get", "merge.ws.driver"])).stdout.trim() !== driverCommand()) {
     throw new Error(`couldn't register the ws merge driver in ${store.tildify(repo.dir)}`)
@@ -188,7 +199,21 @@ async function checkIncoming(repo, ref) {
   const attrs = await smallFile(repo.dir, ref, ".gitattributes")
   if (ignore === null) problems.push(".gitignore can't be read or is too large")
   if (attrs === null) problems.push(".gitattributes can't be read or is too large")
-  for (const line of (ignore || "").split("\n")) if (/^\s*!/.test(line)) problems.push(`.gitignore un-ignores "${line.trim()}"`)
+  // Both rule files may only hold the rules ws writes: anything else could hide a file from
+  // git's own "would be overwritten" guard or change how files merge.
+  const ignores = new Set([...IGNORE_MAIN, ...IGNORE_SHARE])
+  for (const line of (ignore || "").split("\n")) {
+    const l = line.trim()
+    if (l && !l.startsWith("#") && !ignores.has(l)) problems.push(`.gitignore has "${l}"`)
+  }
+  // An incoming file must not land on a file this machine has outside git (its settings, a
+  // queued job, anything ignored or untracked), under any spelling the disk treats as the same.
+  const local = new Map((await git(repo.dir, ["ls-files", "-o", "-z"])).stdout.split("\0").filter(Boolean).map((f) => [fold(f), f]))
+  const tracked = new Set((await git(repo.dir, ["ls-files", "-z"])).stdout.split("\0").filter(Boolean).map(fold))
+  for (const { path: rel } of await entries(repo.dir, ref)) {
+    const k = fold(rel)
+    if (local.has(k) && !tracked.has(k)) problems.push(`${rel} would replace this machine's own ${local.get(k)}`)
+  }
   const allowed = new Set(ATTRIBUTES)
   for (const line of (attrs || "").split("\n")) {
     const l = line.trim()
@@ -255,7 +280,7 @@ export async function syncRepo(repo) {
     await commitAll(repo)
     if (!repo.remote) return { repo: repo.name, status: "local" }
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const f = await git(repo.dir, ["fetch", "-q", "--no-recurse-submodules", "origin"], { timeout: 30_000 })
+      const f = await git(repo.dir, ["fetch", "-q", "--prune", "--no-recurse-submodules", "origin"], { timeout: 30_000 })
       if (f.code !== 0) return { repo: repo.name, status: "offline", detail: f.stderr.trim().split("\n").pop() }
       const haveHead = await hasRef(repo.dir, "HEAD")
       // Check and merge one exact commit, so what was checked is what lands.

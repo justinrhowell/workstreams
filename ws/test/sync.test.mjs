@@ -390,7 +390,9 @@ test("incoming symlinks, machine-local files and un-ignore rules are refused bef
     ["link", { "ws/l/open.md": { link: outside } }, /symlink/],
     ["state", { ".sync-state.json": { link: outside } }, /symlink/],
     ["config", { "config.json": JSON.stringify({ llm: { url: "http://example.invalid/v1" } }) }, /settings/],
-    ["unignore", { ".gitignore": "!config.json\n" }, /un-ignores/],
+    ["unignore", { ".gitignore": "!config.json\n" }, /\.gitignore has/],
+    ["ignore-extra", { ".gitignore": "*.md\n" }, /\.gitignore has/],
+    ["non-ascii", { "ws/l/caf\u00e9.md": { index: "x\n" } }, /plain-ASCII/],
     ["attrs", { "ws/x/.gitattributes": "* merge=union\n" }, /git metadata/],
     ["case-config", { "Config.JSON": { index: "{}" } }, /settings/],
     ["case-queue", { "Queue/job.json": { index: "{}" } }, /queue/],
@@ -481,4 +483,20 @@ test("a data folder's own earlier history never goes to the remote", async () =>
 
 test("merge: records with a duplicated ID are left for a person", () => {
   assert.throws(() => mergeOpenText(open(2, ["- [ ] T-1 a"]), open(2, ["- [ ] T-1 a", "- [ ] T-1 b"]), open(2, ["- [ ] T-1 a"])), /appears twice/)
+})
+
+test("a folder that had another remote before sync doesn't send its history to the new one", async () => {
+  const backup = await bare("old-backup")
+  const remote = await bare("new-hub")
+  const a = await machine("repoint-a", { remote })
+  git(a.root, "init", "-q", "-b", "main")
+  await fs.writeFile(path.join(a.root, "secret-old.md"), "old\n")
+  git(a.root, "add", "-A"); git(a.root, "commit", "-qm", "old")
+  git(a.root, "rm", "-q", "secret-old.md"); git(a.root, "commit", "-qm", "removed")
+  git(a.root, "remote", "add", "origin", backup)
+  git(a.root, "push", "-q", "origin", "HEAD:main"); git(a.root, "fetch", "-q", "origin")
+  a.okWs("new", "r", "--title", "R", "--cwd", proj)
+  assert.match(a.okWs("sync"), /main: pushed/)
+  assert.equal(git(tmp, "--git-dir", remote, "rev-list", "--count", "main").out.trim(), "1")
+  assert.equal(git(tmp, "--git-dir", remote, "log", "--all", "--format=%H", "--", "secret-old.md").out.trim(), "")
 })

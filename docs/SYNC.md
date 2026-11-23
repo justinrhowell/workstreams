@@ -95,6 +95,24 @@ Sessions in `~/src/site` then match the workstream, sources resolve, and paths t
 are stored in the other form. A source or project folder that doesn't exist on a machine at all is
 listed in the resume prompt as "not on this machine" instead of failing it.
 
+## Limits
+
+- **Names are plain ASCII.** Sync carries only files whose names are printable ASCII (everything
+  ws writes is); a remote with other names is refused. Disks fold more than ASCII case, so ws
+  can't otherwise be sure two names are different files.
+- **Rule files are ws's own.** `.gitignore` and `.gitattributes` may only hold the rules ws writes;
+  edit `ignore.txt` (folders whose sessions are dropped) instead.
+- **Per-session files edited on two machines at once.** Only `open.md`, `decisions.md` and
+  `WORKSTREAM.md` are merged record by record under ws's locks. Session logs, inbox entries and
+  drafts are one file per session; if the same one is edited on two machines between syncs (for
+  example a draft accepted on both), sync stops on that file rather than guessing.
+- **Joining with existing data, or moving the hub.** A machine's first sync replaces its own git
+  history with one commit, so nothing old is published. Two machines that each start that way
+  share no history, so their first merge can't tell which side changed what: same-ID records are
+  renumbered and a field changed on one side may lose to the other. Start new machines with an
+  empty data folder (they take everything from the remote), and to move to a new hub, push from
+  one machine and let the others start empty.
+
 ## Unattended runs
 
 Scheduled agent runs (a `claude -p` loop on a server) would each be captured as a session. Set

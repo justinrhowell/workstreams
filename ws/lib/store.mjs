@@ -8,7 +8,16 @@ import matter from "gray-matter"
 
 // gray-matter caches parses by text and shares the data object; mutating it poisons
 // later reads of identical text. Passing options disables the cache.
-const parseMd = (text) => matter(text, {})
+// Front matter must be plain YAML. gray-matter also accepts "---js" (and other languages)
+// and evaluates it as code; data synced from another machine must never run here, so any
+// opening line other than a bare "---" is refused, and the code engines throw if reached.
+const noCode = () => { throw new Error("front matter must be plain YAML") }
+export function parseMd(text) {
+  text = String(text ?? "")
+  const first = text.replace(/^\uFEFF/, "").split("\n", 1)[0]
+  if (/^---/.test(first) && first.trim() !== "---") throw new Error(`front matter must start with a bare "---" (found "${first.slice(0, 20)}")`)
+  return matter(text, { language: "yaml", engines: { js: noCode, javascript: noCode, coffee: noCode, coffeescript: noCode, cson: noCode } })
+}
 // Path rewrites from config.json (set once LOCAL is read below; WS_ROOT itself is never mapped).
 let localPaths = []
 

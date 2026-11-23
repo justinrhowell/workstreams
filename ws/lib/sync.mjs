@@ -7,13 +7,17 @@
 // logs, inbox entries, drafts) is one file per session and doesn't collide.
 //
 // Safety:
-// - Off unless config.json has `sync.remote` or `sync.shares`; never run by tests or hooks in
-//   the foreground. Hooks and writes only start a detached `ws sync --quiet`.
+// - Off unless config.json has `sync.remote` or `sync.shares`; hooks and writes only start a
+//   detached `ws sync --quiet`, never a foreground one.
+// - The remote is data, never code or settings. Before anything incoming is merged, its tree
+//   is checked: symlinks, submodules, this machine's own files (config.json, the queue, locks),
+//   nested .gitattributes and ignore-rule negations are refused, and the sync stops. Outgoing
+//   commits drop the same paths whatever .gitignore says. git runs with hooks off, symlinks
+//   checked out as plain files, and the user's signing and fast-forward-only settings ignored.
 // - The merge runs while holding ws's own locks on every record file it can change, so a ws
-//   write can't land halfway through it and be lost. A merge that fails is aborted
-//   (`git merge --abort`), leaving the local commits in place; nothing is ever force-pushed.
-// - A clone whose merge driver isn't registered (a fresh clone, a moved install) registers it
-//   before merging; if that fails, the sync stops instead of falling back to a text merge.
+//   write can't land halfway through it and be lost. A merge that fails is aborted; if the
+//   abort itself fails, sync stops and commits nothing until the repo is clean. Nothing is
+//   ever force-pushed.
 import { execFile, spawn } from "node:child_process"
 import { promises as fs, existsSync } from "node:fs"
 import path from "node:path"
@@ -27,37 +31,60 @@ const BRANCH = "main"
 const RECORD_FILES = ["open.md", "decisions.md", "WORKSTREAM.md"]
 
 // Never synced: this machine's settings, its queue (jobs point at local transcripts), locks,
-// temp files, the trash, eval copies of transcripts, and (in the main repo) the shares, which
-// are repos of their own.
+// temp files, the trash, eval copies of transcripts, sync's own state, and (in the main repo)
+// the shares, which are repos of their own.
 const LOCAL_FILES = [".sync-renames.log", ".sync-state.json", "sync-problems.log"]
 const IGNORE_MAIN = ["config.json", "config.json.bak*", "queue/", "shares/", "*.lock/", "*.takeover/", "*.tmp", "hook-errors.log", "eval/transcripts/", "eval/reports/", ".trash/", ...LOCAL_FILES]
-const IGNORE_SHARE = ["queue/", "*.lock/", "*.takeover/", "*.tmp", ...LOCAL_FILES]
-// Line lists merge as a union: two machines each adding a line (an ignored folder, an ignore
-// rule written by another ws version) is not a conflict.
+const IGNORE_SHARE = ["config.json", "queue/", "*.lock/", "*.takeover/", "*.tmp", ...LOCAL_FILES]
+// Line lists merge as a union: two machines each adding a line is not a conflict.
 const ATTRIBUTES = [...RECORD_FILES.map((f) => `ws/*/${f} merge=ws`), ".gitignore merge=union", ".gitattributes merge=union", "ignore.txt merge=union"]
+
+// The same rules as code, so they hold whatever a (possibly remote-edited) .gitignore says.
+export function forbidden(rel, kind) {
+  const parts = rel.split("/")
+  const base = parts[parts.length - 1]
+  if (rel === ".gitignore" || rel === ".gitattributes") return null
+  if (parts.some((p) => p === ".git" || (p.startsWith(".git") && p !== ".gitkeep"))) return "git metadata"
+  if (parts.length === 1 && /^config\.json/.test(base)) return "this machine's settings"
+  if (parts[0] === "queue") return "this machine's summary queue"
+  if (kind === "main" && parts[0] === "shares") return "a share (its own repo)"
+  if (parts.some((p) => p.endsWith(".lock") || p.endsWith(".takeover"))) return "a lock"
+  if (base.endsWith(".tmp")) return "a temp file"
+  if (parts[0] === ".trash") return "the trash"
+  if (rel.startsWith("eval/transcripts/") || rel.startsWith("eval/reports/")) return "eval copies"
+  if (["hook-errors.log", ...LOCAL_FILES].includes(rel)) return "sync state"
+  return null
+}
 
 export const enabled = () => store.LOCAL.enabled
 
 export function repos() {
-  const out = [{ name: "main", dir: store.ROOT, remote: store.LOCAL.remote, ignore: IGNORE_MAIN }]
-  for (const s of store.LOCAL.shares) out.push({ name: s.name, dir: s.dir, remote: s.remote, ignore: IGNORE_SHARE })
+  const out = [{ name: "main", kind: "main", dir: store.ROOT, remote: store.LOCAL.remote, ignore: IGNORE_MAIN }]
+  for (const s of store.LOCAL.shares) out.push({ name: s.name, kind: "share", dir: s.dir, remote: s.remote, ignore: IGNORE_SHARE })
   return out
 }
 
 // ------------------------------------------------------------------------ git
 
-function git(dir, args, { timeout = 30_000, allowFail = true } = {}) {
+// Settings that must not come from the user's global config or from the repo: no hooks, no
+// symlinks on disk, no signing prompts in a background job, merges allowed to create commits.
+const SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.symlinks=false", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+  "-c", "merge.ff=true", "-c", "merge.verifySignatures=false", "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-c", "pull.rebase=false"]
+
+let sshCmd = null
+async function sshEnv() {
+  if (sshCmd === null) {
+    // Keep a core.sshCommand the user set; otherwise never wait on a prompt in the background.
+    const own = await new Promise((r) => execFile("git", ["config", "--get", "core.sshCommand"], (e, out) => r(String(out || "").trim())))
+    sshCmd = process.env.GIT_SSH_COMMAND || (own ? "" : "ssh -o BatchMode=yes -o ConnectTimeout=8")
+  }
+  return sshCmd ? { GIT_SSH_COMMAND: sshCmd } : {}
+}
+
+async function git(dir, args, { timeout = 30_000, allowFail = true } = {}) {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C", ...(await sshEnv()) }
   return new Promise((resolve, reject) => {
-    execFile("git", args, {
-      cwd: dir, timeout, maxBuffer: 16 * 1024 * 1024,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: "0",
-        // Never wait on a password prompt or an unknown host from a background sync.
-        GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND || "ssh -o BatchMode=yes -o ConnectTimeout=8",
-        LC_ALL: "C",
-      },
-    }, (err, stdout, stderr) => {
+    execFile("git", [...SAFE, ...args], { cwd: dir, timeout, maxBuffer: 32 * 1024 * 1024, env }, (err, stdout, stderr) => {
       const r = { code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout: String(stdout), stderr: String(stderr), killed: !!err?.killed }
       if (err && !allowFail) reject(new Error(`git ${args[0]} failed in ${store.tildify(dir)}: ${r.stderr.trim() || err.message}`))
       else resolve(r)
@@ -66,6 +93,8 @@ function git(dir, args, { timeout = 30_000, allowFail = true } = {}) {
 }
 
 async function ensureLines(file, lines, header) {
+  // Never write through a link the remote might have planted.
+  try { if ((await fs.lstat(file)).isSymbolicLink()) await fs.rm(file) } catch {}
   const cur = (await store.readText(file)) || ""
   const have = new Set(cur.split("\n").map((l) => l.trim()))
   const add = lines.filter((l) => !have.has(l))
@@ -85,18 +114,14 @@ export async function ensureRepo(repo) {
   if (!existsSync(path.join(repo.dir, ".git"))) {
     await git(repo.dir, ["init", "-q", "-b", BRANCH], { allowFail: false })
   }
-  await ensureLines(path.join(repo.dir, ".gitignore"), repo.ignore, "ws: never synced (this machine's own)")
-  await ensureLines(path.join(repo.dir, ".gitattributes"), ATTRIBUTES, "ws: record files merge item by item (ws merge-driver)")
-  // A file that was tracked before it was ignored (config.json in older data folders) stops
-  // being tracked here; the file itself stays.
-  for (const f of ["config.json"]) {
-    if ((await git(repo.dir, ["ls-files", "--error-unmatch", f])).code === 0) await git(repo.dir, ["rm", "-q", "--cached", f])
-  }
   const set = async (k, v) => {
     if ((await git(repo.dir, ["config", "--local", "--get", k])).stdout.trim() !== v) await git(repo.dir, ["config", "--local", k, v], { allowFail: false })
   }
+  await set("core.symlinks", "false")
   await set("merge.ws.name", "ws record merge")
   await set("merge.ws.driver", driverCommand())
+  await ensureLines(path.join(repo.dir, ".gitignore"), repo.ignore, "ws: never synced (this machine's own)")
+  await ensureLines(path.join(repo.dir, ".gitattributes"), ATTRIBUTES, "ws: record files merge item by item (ws merge-driver)")
   if (!(await git(repo.dir, ["config", "user.email"])).stdout.trim()) {
     await set("user.name", `ws (${store.LOCAL.machine})`)
     await set("user.email", `ws@${store.LOCAL.machine}.invalid`)
@@ -111,8 +136,47 @@ export async function ensureRepo(repo) {
   }
 }
 
+const mergeInProgress = (repo) => existsSync(path.join(repo.dir, ".git", "MERGE_HEAD"))
+const unmerged = async (repo) => (await git(repo.dir, ["ls-files", "-u"])).stdout.trim() !== ""
+
+// Index entries (mode, path) of the tree at `ref`, or of the index when ref is null.
+async function entries(dir, ref) {
+  const out = ref
+    ? (await git(dir, ["ls-tree", "-r", "-z", "--full-tree", ref], { allowFail: false })).stdout
+    : (await git(dir, ["ls-files", "-s", "-z"], { allowFail: false })).stdout
+  return out.split("\0").filter(Boolean).map((e) => {
+    const tab = e.indexOf("\t")
+    return { mode: e.slice(0, tab).split(" ")[0], path: e.slice(tab + 1) }
+  })
+}
+
+// Is everything in the incoming tree plain data this machine may take?
+async function checkIncoming(repo, ref) {
+  const problems = []
+  for (const { mode, path: rel } of await entries(repo.dir, ref)) {
+    if (mode === "120000") problems.push(`${rel} is a symlink`)
+    else if (mode === "160000") problems.push(`${rel} is a submodule`)
+    else {
+      const why = forbidden(rel, repo.kind)
+      if (why) problems.push(`${rel} is ${why}`)
+    }
+  }
+  const show = async (f) => (await git(repo.dir, ["show", `${ref}:${f}`])).stdout
+  for (const line of (await show(".gitignore")).split("\n")) if (/^\s*!/.test(line)) problems.push(`.gitignore un-ignores "${line.trim()}"`)
+  const allowed = new Set(ATTRIBUTES)
+  for (const line of (await show(".gitattributes")).split("\n")) {
+    const l = line.trim()
+    if (l && !l.startsWith("#") && !allowed.has(l)) problems.push(`.gitattributes sets "${l}"`)
+  }
+  return problems
+}
+
 async function commitAll(repo) {
+  if (mergeInProgress(repo) || (await unmerged(repo))) throw new Error(`a merge is unfinished in ${store.tildify(repo.dir)}; run \`git merge --abort\` there`)
   await git(repo.dir, ["add", "-A"], { allowFail: false })
+  // Whatever .gitignore says: this machine's own files and links never leave it.
+  const drop = (await entries(repo.dir, null)).filter((e) => e.mode === "120000" || e.mode === "160000" || forbidden(e.path, repo.kind)).map((e) => e.path)
+  if (drop.length) await git(repo.dir, ["rm", "-q", "--cached", "--", ...drop], { allowFail: false })
   const staged = await git(repo.dir, ["diff", "--cached", "--quiet"])
   if (staged.code === 0) return false
   // The message carries no content: logs and items are the content.
@@ -130,29 +194,43 @@ async function withRecordLocks(files, fn) {
   return take(0)
 }
 
+// Undo a half-done merge. If git can't, the repo needs a person: stop.
+async function abortMerge(repo) {
+  if (mergeInProgress(repo)) await git(repo.dir, ["merge", "--abort"])
+  if (mergeInProgress(repo) || (await unmerged(repo))) {
+    throw new Error(`couldn't undo a failed merge in ${store.tildify(repo.dir)}; run \`git merge --abort\` (or \`git reset --merge\`) there`)
+  }
+}
+
 // One repo: commit, fetch, merge, push. Returns { repo, status, detail? } where status is
-// local (no remote), offline, pushed, up-to-date or conflict.
+// local (no remote), offline, pushed, up-to-date, refused (incoming data failed the check) or
+// conflict.
 export async function syncRepo(repo) {
-  await ensureRepo(repo)
+  await fs.mkdir(repo.dir, { recursive: true })
   return store.withLock(path.join(repo.dir, ".sync"), async () => {
+    await ensureRepo(repo)
     // A sync killed in the middle of a merge leaves it half done: undo that first (the local
     // commits from before it are untouched), then start over.
-    if (existsSync(path.join(repo.dir, ".git", "MERGE_HEAD"))) await git(repo.dir, ["merge", "--abort"])
+    await abortMerge(repo)
     await commitAll(repo)
     if (!repo.remote) return { repo: repo.name, status: "local" }
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const f = await git(repo.dir, ["fetch", "-q", "origin"], { timeout: 30_000 })
+      const f = await git(repo.dir, ["fetch", "-q", "--no-recurse-submodules", "origin"], { timeout: 30_000 })
       if (f.code !== 0) return { repo: repo.name, status: "offline", detail: f.stderr.trim().split("\n").pop() }
       const remoteRef = `refs/remotes/origin/${BRANCH}`
       const haveHead = await hasRef(repo.dir, "HEAD")
       if (await hasRef(repo.dir, remoteRef)) {
         if (!haveHead || !(await isAncestor(repo.dir, remoteRef, "HEAD"))) {
+          const problems = await checkIncoming(repo, remoteRef)
+          if (problems.length) {
+            return { repo: repo.name, status: "refused", detail: `the remote has files ws won't take: ${problems.slice(0, 3).join("; ")}${problems.length > 3 ? ` (+${problems.length - 3} more)` : ""}` }
+          }
           const merged = await mergeIncoming(repo, remoteRef, haveHead)
           if (merged.status === "conflict") return merged
         }
         if (await isAncestor(repo.dir, "HEAD", remoteRef)) return { repo: repo.name, status: "up-to-date" }
       } else if (!haveHead) return { repo: repo.name, status: "up-to-date" } // nothing anywhere yet
-      const p = await git(repo.dir, ["push", "-q", "origin", `HEAD:${BRANCH}`], { timeout: 60_000 })
+      const p = await git(repo.dir, ["push", "-q", "--no-verify", "origin", `HEAD:${BRANCH}`], { timeout: 60_000 })
       if (p.code === 0) return { repo: repo.name, status: "pushed" }
       if (!/rejected|non-fast-forward|fetch first/i.test(p.stderr)) return { repo: repo.name, status: "offline", detail: p.stderr.trim().split("\n").pop() }
       // Someone pushed between our fetch and push: fetch and merge again.
@@ -163,31 +241,36 @@ export async function syncRepo(repo) {
 
 async function mergeIncoming(repo, remoteRef, haveHead) {
   if (!haveHead) {
-    // A fresh clone with local files but no commits yet (or none at all): adopt the remote
-    // history, then lay local files back on top as a commit and merge as usual.
+    // No local commits and no local files: take the remote as it is.
     const local = (await git(repo.dir, ["status", "--porcelain"])).stdout.trim()
     if (!local) {
       await git(repo.dir, ["reset", "-q", "--hard", remoteRef], { allowFail: false })
       return { status: "ok" }
     }
   }
-  const changed = haveHead
-    ? (await git(repo.dir, ["diff", "--name-only", `HEAD...${remoteRef}`])).stdout.split("\n").filter(Boolean)
-    : (await git(repo.dir, ["ls-tree", "-r", "--name-only", remoteRef])).stdout.split("\n").filter(Boolean)
+  // Files the merge can touch: the diff from the merge base, or (two histories that never met)
+  // everything the remote has.
+  const d = haveHead ? await git(repo.dir, ["diff", "--name-only", `HEAD...${remoteRef}`]) : { code: 1 }
+  const changed = d.code === 0
+    ? d.stdout.split("\n").filter(Boolean)
+    : (await git(repo.dir, ["ls-tree", "-r", "--name-only", "--full-tree", remoteRef])).stdout.split("\n").filter(Boolean)
   // A workstream folder that only exists on the other side has no local writer to hold off.
   const locks = changed.filter((f) => RECORD_FILES.includes(path.basename(f))).map((f) => path.join(repo.dir, f)).filter((f) => existsSync(path.dirname(f)))
   return withRecordLocks(locks, async () => {
     await commitAll(repo) // anything written since the first commit, now that writers are held off
     await fs.rm(path.join(repo.dir, ".sync-renames.log"), { force: true })
-    const m = await git(repo.dir, ["merge", "-q", "--no-edit", "--allow-unrelated-histories", "-m", `ws sync: merge on ${store.LOCAL.machine}`, remoteRef], { timeout: 60_000 })
+    const m = await git(repo.dir, ["merge", "-q", "--no-edit", "--no-verify", "--allow-unrelated-histories", "-m", `ws sync: merge on ${store.LOCAL.machine}`, remoteRef], { timeout: 60_000 })
     if (m.code !== 0) {
       const files = (await git(repo.dir, ["diff", "--name-only", "--diff-filter=U"])).stdout.split("\n").filter(Boolean)
-      await git(repo.dir, ["merge", "--abort"])
+      await abortMerge(repo)
+      await fs.rm(path.join(repo.dir, ".sync-renames.log"), { force: true }) // nothing was renumbered after all
       return { repo: repo.name, status: "conflict", detail: files.length ? `couldn't merge ${files.join(", ")}` : (m.stderr || m.stdout).trim().split("\n").slice(-2).join(" ") }
     }
     return { status: "ok" }
   })
 }
+
+export const BAD = ["conflict", "error", "refused"]
 
 export async function syncAll() {
   if (!enabled()) throw new Error("sync isn't set up: add sync.remote or sync.shares to config.json (docs/SYNC.md)")
@@ -199,13 +282,14 @@ export async function syncAll() {
       else results.push({ repo: repo.name, status: "error", detail: e.message })
     }
     const file = path.join(repo.dir, ".sync-renames.log")
-    const renames = await store.readText(file).catch(() => null)
-    if (renames?.trim()) results[results.length - 1].renames = renames.trim().split("\n")
+    try { if ((await fs.lstat(file)).isFile()) { const t = await store.readText(file); if (t?.trim()) results[results.length - 1].renames = t.trim().split("\n") } } catch {}
     await fs.rm(file, { force: true }) // reported once
   }
   // Last outcome, for the session-start note (a background sync that stopped says so there).
   if (!results.every((r) => r.status === "busy")) {
-    await store.writeFileAtomic(path.join(store.ROOT, ".sync-state.json"), JSON.stringify({ at: new Date().toISOString(), machine: store.LOCAL.machine, results }, null, 2) + "\n").catch(() => {})
+    const state = path.join(store.ROOT, ".sync-state.json")
+    try { if ((await fs.lstat(state)).isSymbolicLink()) await fs.rm(state) } catch {}
+    await store.writeFileAtomic(state, JSON.stringify({ at: new Date().toISOString(), machine: store.LOCAL.machine, results }, null, 2) + "\n").catch(() => {})
   }
   return results
 }
@@ -285,7 +369,8 @@ export function timerFiles({ intervalSec = 120 } = {}) {
     return [{ file, text }]
   }
   const dir = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "systemd", "user")
-  const q = (s) => `"${String(s).replace(/(["\\$`])/g, "\\$1")}"`
+  // systemd unquoting: backslash escapes, and % is a specifier unless doubled.
+  const q = (s) => `"${String(s).replace(/[\r\n]/g, "").replace(/(["\\])/g, "\\$1").replace(/%/g, "%%")}"`
   return [
     { file: path.join(dir, `${LABEL}.service`), text: `[Unit]\nDescription=ws sync (workstream data across machines)\n[Service]\nType=oneshot\nEnvironment=${q(`WS_ROOT=${store.ROOT}`)}\nExecStart=${q(node)} ${q(BIN)} sync --quiet\n` },
     { file: path.join(dir, `${LABEL}.timer`), text: `[Unit]\nDescription=ws sync every ${intervalSec}s\n[Timer]\nOnBootSec=60\nOnUnitActiveSec=${intervalSec}\nAccuracySec=10\n[Install]\nWantedBy=timers.target\n` },

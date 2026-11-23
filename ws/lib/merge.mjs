@@ -14,9 +14,8 @@
 //   first) and ours is renumbered to the next free one. The renumbering is reported.
 // Free text (notes, extra lines) is merged as a union, ours first.
 import matter from "gray-matter"
-import { parseOpen, renderOpen, parseDecisions, renderDecisions, normalizeEol, oneLine } from "./store.mjs"
+import { parseOpen, renderOpen, parseDecisions, renderDecisions, normalizeEol, oneLine, parseMd } from "./store.mjs"
 
-const parseMd = (text) => matter(text, {})
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const numOf = (id, sep) => Number(String(id).split(sep).pop())
 

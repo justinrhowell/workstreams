@@ -18,11 +18,22 @@ set it up, and it needs nothing but git and an SSH-reachable (or local) git remo
 - **Everything else is one file per session** (logs, inbox entries, drafts), so machines don't
   collide. Logs and inbox entries record which machine wrote them (`host:`).
 - **Safe by default.** A merge runs while holding ws's own locks on the files it changes. A merge
-  that fails is aborted, your local commits stay, and nothing is force-pushed. A sync killed in the
-  middle is undone and redone by the next one. Problems from background syncs go to
-  `sync-problems.log` in the data folder.
+  that fails is aborted, your local commits stay, and nothing is force-pushed; if git can't undo it,
+  sync stops and commits nothing until the repo is clean. A sync killed in the middle is undone and
+  redone by the next one. A sync that stops says so at the start of your next session, and
+  problems from background syncs go to `sync-problems.log` in the data folder.
 - **Never synced:** `config.json` (each machine's own), the summary queue (jobs point at local
-  transcripts), locks, the trash, and eval transcript copies.
+  transcripts), locks, the trash, and eval transcript copies. This is enforced in code, not only
+  by `.gitignore`: outgoing commits drop these paths and links whatever `.gitignore` says.
+- **The remote is data, never code or settings.** Before merging, ws checks everything incoming and
+  stops the sync (`refused`, shown at the next session start) if the remote has symlinks,
+  submodules, a machine's own files (`config.json`, the queue, locks), `.gitattributes` or `.git*`
+  files in subfolders, or ignore rules that un-ignore something. Front matter must be plain YAML
+  (`---`); anything else (`---js`) is refused when read, never evaluated. git runs with hooks off,
+  symlinks checked out as plain files, and your signing and fast-forward-only settings ignored.
+- **Two machines changed the same field** of `WORKSTREAM.md` (status, title): the local value is
+  kept. A workstream deleted on one machine and edited on another stops that repo's sync until you
+  restore or delete it on both.
 
 ## Set up
 

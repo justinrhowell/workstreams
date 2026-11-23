@@ -11,6 +11,10 @@ All notable changes to ws. Versions follow [semantic versioning](https://semver.
 - With sync set up, logs and inbox entries record the machine (`host:`), and manual log names include it.
 - `WS_CAPTURE=0` leaves a session out of capture (for scheduled, unattended agent runs).
 
+### Security
+- Front matter is parsed as plain YAML only, everywhere ws reads it. gray-matter's other front-matter languages (`---js`, which it evaluates as code) are refused.
+- A workstream whose folder is the home folder (or above it) never claims sessions automatically.
+
 Fixes from a cross-model (Codex) end-to-end review of 0.2.1.
 
 ### Fixed

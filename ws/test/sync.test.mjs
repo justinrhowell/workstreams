@@ -9,15 +9,18 @@ import path from "node:path"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
 import { mergeOpenText, mergeDecisionsText, mergeWorkstreamText } from "../lib/merge.mjs"
+import { matchWorkstream } from "../lib/capture.mjs"
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "ws.mjs")
 const STORE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lib", "store.mjs")
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "ws-sync-test-"))
 const gitEnv = { GIT_CONFIG_GLOBAL: path.join(tmp, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" }
-await fs.writeFile(gitEnv.GIT_CONFIG_GLOBAL, "[init]\n\tdefaultBranch = main\n")
+// Settings a user might have globally that must not break background syncs: signing (with a
+// signer that always fails) and fast-forward-only merges.
+await fs.writeFile(gitEnv.GIT_CONFIG_GLOBAL, "[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n[merge]\n\tff = only\n")
 
 function git(dir, ...args) {
-  const r = spawnSync("git", args, { cwd: dir, encoding: "utf-8", env: { ...process.env, ...gitEnv } })
+  const r = spawnSync("git", ["-c", "commit.gpgsign=false", "-c", "merge.ff=true", ...args], { cwd: dir, encoding: "utf-8", env: { ...process.env, ...gitEnv } })
   return { code: r.status, out: (r.stdout || "") + (r.stderr || "") }
 }
 async function bare(name) {
@@ -328,4 +331,115 @@ test("a data folder with its own history and .gitignore joins without conflicts"
     assert.match(await m.read("ignore.txt"), /\/tmp\/a[\s\S]*\/tmp\/b|\/tmp\/b[\s\S]*\/tmp\/a/)
   }
   assert.equal(await a.read(".gitignore"), await b.read(".gitignore"))
+})
+
+// ------------------------------------------------------------ the remote is data only
+
+// Push a commit to `remote` made by plain git (as another, misbehaving machine could), on top
+// of what is there. `files` maps path -> text, or { link: target } for a symlink.
+async function pushRaw(remote, name, files) {
+  const dir = path.join(tmp, `raw-${name}`)
+  git(tmp, "clone", "-q", remote, dir)
+  for (const [rel, v] of Object.entries(files)) {
+    const f = path.join(dir, rel)
+    await fs.mkdir(path.dirname(f), { recursive: true })
+    await fs.rm(f, { force: true })
+    if (typeof v === "string") await fs.writeFile(f, v)
+    else await fs.symlink(v.link, f)
+  }
+  git(dir, "add", "-A", "-f")
+  assert.equal(git(dir, "commit", "-qm", "raw").code, 0)
+  assert.equal(git(dir, "push", "-q", "origin", "HEAD:main").code, 0)
+}
+
+test("front matter must be YAML: code in it is never run, locally or from a merge", async () => {
+  const mark = path.join(tmp, "ran-code")
+  const evil = `---js\n{ x: require("fs").writeFileSync(${JSON.stringify(mark)}, "1") }\n---\n\nbrief\n`
+  assert.throws(() => mergeWorkstreamText("", evil, ""), /plain YAML|bare "---"/)
+  assert.throws(() => mergeWorkstreamText("", "---\nid: a\n---\n", evil), /plain YAML|bare "---"/)
+  const remote = await bare("yamlonly")
+  const a = await machine("yaml-a", { remote })
+  a.okWs("new", "y", "--title", "Y", "--cwd", proj)
+  a.okWs("sync")
+  await pushRaw(remote, "yaml", { "ws/y/WORKSTREAM.md": evil })
+  a.ws("sync")
+  a.ws("ls"); a.ws("show", "y")
+  const hook = spawnSync(process.execPath, [BIN, "hook", "claude", "start"], { input: JSON.stringify({ session_id: "s", cwd: proj }), encoding: "utf-8", env: { ...process.env, ...gitEnv, WS_ROOT: a.root, WS_NO_SPAWN: "1" } })
+  assert.equal(hook.status, 0)
+  assert.ok(!existsSync(mark), "front-matter code ran")
+})
+
+test("incoming symlinks, machine-local files and un-ignore rules are refused before merging", async () => {
+  const outside = path.join(tmp, "outside-target.txt")
+  await fs.writeFile(outside, "keep me\n")
+  for (const [name, files, why] of [
+    ["link", { "ws/l/open.md": { link: outside } }, /symlink/],
+    ["state", { ".sync-state.json": { link: outside } }, /symlink/],
+    ["config", { "config.json": JSON.stringify({ llm: { url: "http://example.invalid/v1" } }) }, /settings/],
+    ["unignore", { ".gitignore": "!config.json\n" }, /un-ignores/],
+    ["attrs", { "ws/x/.gitattributes": "* merge=union\n" }, /git metadata/],
+  ]) {
+    const remote = await bare(`refuse-${name}`)
+    const a = await machine(`ref-${name}`, { remote })
+    a.okWs("new", "l", "--title", "L", "--cwd", proj, "--prefix", "L")
+    a.okWs("sync")
+    const before = await a.read("config.json")
+    await pushRaw(remote, name, files)
+    a.okWs("item", "add", "l", "local item")
+    const r = a.ws("sync")
+    assert.notEqual(r.code, 0, `${name}: ${r.out}`)
+    assert.match(r.out, /main: refused/)
+    assert.match(r.out, why)
+    assert.equal(await a.read("config.json"), before, `${name}: local config.json changed`)
+    assert.equal(await fs.readFile(outside, "utf-8"), "keep me\n", `${name}: wrote outside the data folder`)
+    assert.ok(!(await fs.lstat(path.join(a.root, "ws/l/open.md"))).isSymbolicLink())
+    assert.match(await a.read("ws/l/open.md"), /L-1 local item/)
+  }
+})
+
+test("this machine's own files never go out, whatever .gitignore says", async () => {
+  const remote = await bare("outgoing")
+  const a = await machine("out-a", { remote })
+  a.okWs("new", "o", "--title", "O", "--cwd", proj)
+  a.okWs("sync")
+  await fs.appendFile(path.join(a.root, ".gitignore"), "!config.json\n!queue/\n")
+  await fs.mkdir(path.join(a.root, "queue"), { recursive: true })
+  await fs.writeFile(path.join(a.root, "queue", "j.json"), "{}")
+  await fs.symlink(path.join(tmp, "outside-target.txt"), path.join(a.root, "a-link"))
+  a.okWs("item", "add", "o", "x")
+  a.okWs("sync")
+  const pushed = git(tmp, "--git-dir", remote, "ls-tree", "-r", "--name-only", "main").out.split("\n")
+  assert.ok(pushed.includes("ws/o/open.md"))
+  for (const f of ["config.json", "queue/j.json", "a-link"]) assert.ok(!pushed.includes(f), `${f} was pushed`)
+})
+
+test("a merge that can't be undone stops sync; nothing half-merged is committed or pushed", async () => {
+  const remote = await bare("stuck")
+  const a = await machine("stuck-a", { remote })
+  const b = await machine("stuck-b", { remote })
+  a.okWs("new", "s", "--title", "S", "--cwd", proj)
+  a.okWs("sync"); b.okWs("sync")
+  await fs.writeFile(path.join(a.root, "notes.txt"), "a\n"); a.okWs("sync")
+  await fs.writeFile(path.join(b.root, "notes.txt"), "b\n")
+  git(b.root, "add", "-A"); git(b.root, "commit", "-qm", "b notes")
+  git(b.root, "fetch", "-q", "origin")
+  git(b.root, "merge", "-q", "origin/main") // conflicts on notes.txt
+  await fs.rm(path.join(b.root, ".git", "MERGE_HEAD")) // git merge --abort can no longer undo it
+  b.okWs("item", "add", "s", "written meanwhile")
+  const headBefore = git(tmp, "--git-dir", remote, "rev-parse", "main").out.trim()
+  const r = b.ws("sync")
+  assert.notEqual(r.code, 0)
+  assert.match(r.out, /couldn't undo a failed merge|unfinished/)
+  const pushed = git(tmp, "--git-dir", remote, "show", "main:notes.txt").out
+  assert.doesNotMatch(pushed, /<<<<<<<|>>>>>>>/)
+  assert.equal(git(tmp, "--git-dir", remote, "rev-parse", "main").out.trim(), headBefore, "nothing new was pushed")
+  assert.match(git(b.root, "status", "--porcelain").out, /notes\.txt/, "the stuck merge is left for a person, not committed")
+})
+
+test("a workstream set at the home folder (or above) never claims sessions", () => {
+  const list = [
+    { id: "home", cwd: os.homedir(), status: "active" },
+    { id: "root", cwd: "/", status: "active" },
+  ]
+  assert.equal(matchWorkstream(list, path.join(os.homedir(), "anything"), undefined).link, null)
 })

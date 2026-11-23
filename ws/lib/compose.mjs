@@ -3,12 +3,10 @@
 import { promises as fs, existsSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
-import matter from "gray-matter"
 
 // gray-matter caches parses by text and shares the data object; mutating it poisons
 // later reads of identical text. Passing options disables the cache.
-const parseMd = (text) => matter(text, {})
-import { getWorkstream, getProcedure, readOpen, readDecisions, fillVars, variablesIn, tildify, expand, LOCAL } from "./store.mjs"
+import { getWorkstream, getProcedure, readOpen, readDecisions, fillVars, variablesIn, tildify, expand, LOCAL, parseMd } from "./store.mjs"
 import { listProposals } from "./summarize.mjs"
 
 // The command line that starts each tool with the prompt as its first message, or resumes

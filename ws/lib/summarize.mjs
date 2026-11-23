@@ -11,8 +11,8 @@ import matter from "gray-matter"
 
 // gray-matter caches parses by text and shares the data object; mutating it poisons
 // later reads of identical text. Passing options disables the cache.
-const parseMd = (text) => matter(text, {})
 import * as store from "./store.mjs"
+const { parseMd } = store
 import { loadConfig } from "./config.mjs"
 import { claudeDir, codexDir, geminiDir } from "./paths.mjs"
 import { loadGeminiSession, partText } from "./gemini.mjs"

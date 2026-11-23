@@ -7,10 +7,10 @@ import matter from "gray-matter"
 
 // gray-matter caches parses by text and shares the data object; mutating it poisons
 // later reads of identical text. Passing options disables the cache.
-const parseMd = (text) => matter(text, {})
 import { codexDir } from "./paths.mjs"
 import { loadGeminiSession, partText, wsToolName, isGeminiInjected } from "./gemini.mjs"
 import * as store from "./store.mjs"
+const { parseMd } = store
 import * as summarize from "./summarize.mjs"
 
 export const INBOX_DIR = path.join(store.ROOT, "inbox")
@@ -176,7 +176,10 @@ export function matchWorkstream(list, cwd, wsId) {
   if (wsId && list.some((w) => w.id === wsId)) return { link: wsId, candidates: [wsId] }
   // A relative cwd (from a hand edit or an older `ws set`) would resolve against the
   // session's own folder and claim every session, so it never matches.
-  const live = list.filter((w) => w.cwd && path.isAbsolute(w.cwd) && ["active", "waiting"].includes(w.status) && under(cwd, w.cwd))
+  // The home folder (or above it) is no project: a workstream set there would claim every
+  // session started anywhere, and with sync its logs would go wherever that workstream syncs.
+  const tooBroad = (dir) => under(os.homedir(), dir)
+  const live = list.filter((w) => w.cwd && path.isAbsolute(w.cwd) && !tooBroad(w.cwd) && ["active", "waiting"].includes(w.status) && under(cwd, w.cwd))
   if (!live.length) return { link: null, candidates: [] }
   const len = (w) => canon(w.cwd).length
   const best = Math.max(...live.map(len))
@@ -418,7 +421,7 @@ async function syncWarning() {
   if (!store.LOCAL.enabled) return ""
   try {
     const st = JSON.parse(await fs.readFile(path.join(store.ROOT, ".sync-state.json"), "utf-8"))
-    const bad = (st.results || []).filter((r) => ["conflict", "error"].includes(r.status))
+    const bad = (st.results || []).filter((r) => ["conflict", "error", "refused"].includes(r.status))
     if (!bad.length) return ""
     return `[ws] Sync between machines has stopped since ${String(st.at).slice(0, 16).replace("T", " ")} (${bad.map((r) => `${r.repo}: ${r.detail || r.status}`).join("; ")}). Local changes are safe; tell the user, who can run \`ws sync\` to see what to fix.`
   } catch { return "" }

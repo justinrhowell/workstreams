@@ -794,7 +794,7 @@ async function cmdSync() {
   const wait = Number(opt.wait || 0)
   if (wait > 0) await new Promise((r) => setTimeout(r, Math.min(wait, 60) * 1000))
   const results = await sync.syncAll()
-  const bad = results.filter((r) => ["conflict", "error"].includes(r.status))
+  const bad = results.filter((r) => sync.BAD.includes(r.status))
   if (bad.length || results.some((r) => r.renames?.length)) {
     const line = `${new Date().toISOString()} ${results.map((r) => `${r.repo}:${r.status}${r.detail ? ` (${r.detail})` : ""}${r.renames ? ` renamed ${r.renames.join("; ")}` : ""}`).join(" ")}\n`
     try { await fs.appendFile(path.join(store.ROOT, "sync-problems.log"), line) } catch {}

@@ -40,10 +40,15 @@ const IGNORE_SHARE = ["config.json", "queue/", "*.lock/", "*.takeover/", "*.tmp"
 const ATTRIBUTES = [...RECORD_FILES.map((f) => `ws/*/${f} merge=ws`), ".gitignore merge=union", ".gitattributes merge=union", "ignore.txt merge=union"]
 
 // The same rules as code, so they hold whatever a (possibly remote-edited) .gitignore says.
+// Compared case-folded and Unicode-normalized: on a case-insensitive disk (macOS) "Config.json"
+// is config.json.
+export const fold = (s) => String(s).normalize("NFC").toLowerCase()
 export function forbidden(rel, kind) {
+  if (rel === ".gitignore" || rel === ".gitattributes") return null
+  if ([".gitignore", ".gitattributes"].includes(fold(rel))) return "a case variant of a git file"
+  rel = fold(rel)
   const parts = rel.split("/")
   const base = parts[parts.length - 1]
-  if (rel === ".gitignore" || rel === ".gitattributes") return null
   if (parts.some((p) => p === ".git" || (p.startsWith(".git") && p !== ".gitkeep"))) return "git metadata"
   if (parts.length === 1 && /^config\.json/.test(base)) return "this machine's settings"
   if (parts[0] === "queue") return "this machine's summary queue"
@@ -150,10 +155,28 @@ async function entries(dir, ref) {
   })
 }
 
+// The text of a small file at `ref`, "" when it doesn't exist; null when git can't read it or
+// it is too big to be an honest rule file (fail closed).
+async function smallFile(dir, ref, f, max = 64 * 1024) {
+  const size = await git(dir, ["cat-file", "-s", `${ref}:${f}`])
+  if (size.code !== 0) return /does not exist|not a valid object|exists on disk, but not in/i.test(size.stderr) ? "" : null
+  if (Number(size.stdout.trim()) > max) return null
+  const r = await git(dir, ["cat-file", "blob", `${ref}:${f}`])
+  return r.code === 0 ? r.stdout : null
+}
+
 // Is everything in the incoming tree plain data this machine may take?
 async function checkIncoming(repo, ref) {
   const problems = []
+  const seen = new Map()
   for (const { mode, path: rel } of await entries(repo.dir, ref)) {
+    // Two names one disk would treat as the same file: one could replace the other.
+    const prefixes = rel.split("/").map((_, i, a) => a.slice(0, i + 1).join("/"))
+    for (const p of prefixes) {
+      const k = fold(p)
+      if (seen.has(k) && seen.get(k) !== p) problems.push(`${p} and ${seen.get(k)} differ only in case`)
+      else seen.set(k, p)
+    }
     if (mode === "120000") problems.push(`${rel} is a symlink`)
     else if (mode === "160000") problems.push(`${rel} is a submodule`)
     else {
@@ -161,10 +184,13 @@ async function checkIncoming(repo, ref) {
       if (why) problems.push(`${rel} is ${why}`)
     }
   }
-  const show = async (f) => (await git(repo.dir, ["show", `${ref}:${f}`])).stdout
-  for (const line of (await show(".gitignore")).split("\n")) if (/^\s*!/.test(line)) problems.push(`.gitignore un-ignores "${line.trim()}"`)
+  const ignore = await smallFile(repo.dir, ref, ".gitignore")
+  const attrs = await smallFile(repo.dir, ref, ".gitattributes")
+  if (ignore === null) problems.push(".gitignore can't be read or is too large")
+  if (attrs === null) problems.push(".gitattributes can't be read or is too large")
+  for (const line of (ignore || "").split("\n")) if (/^\s*!/.test(line)) problems.push(`.gitignore un-ignores "${line.trim()}"`)
   const allowed = new Set(ATTRIBUTES)
-  for (const line of (await show(".gitattributes")).split("\n")) {
+  for (const line of (attrs || "").split("\n")) {
     const l = line.trim()
     if (l && !l.startsWith("#") && !allowed.has(l)) problems.push(`.gitattributes sets "${l}"`)
   }
@@ -194,6 +220,20 @@ async function withRecordLocks(files, fn) {
   return take(0)
 }
 
+// The first time this repo meets a remote (an empty one, or one whose history it doesn't share),
+// its own earlier history must not go along: older commits can hold files written before sync
+// existed (old settings, anything since removed). Replace it with one commit of the current,
+// already filtered tree; the old history stays here under refs/ws/pre-sync.
+async function startFresh(repo) {
+  const parents = (await git(repo.dir, ["rev-list", "--count", "HEAD"])).stdout.trim()
+  if (parents === "1") return // already a single commit (filtered by commitAll)
+  const ts = new Date().toISOString().replace(/[-:.]/g, "")
+  await git(repo.dir, ["update-ref", `refs/ws/pre-sync-${ts}`, "HEAD"], { allowFail: false })
+  const tree = (await git(repo.dir, ["rev-parse", "HEAD^{tree}"], { allowFail: false })).stdout.trim()
+  const c = (await git(repo.dir, ["commit-tree", tree, "-m", `ws sync: start on ${store.LOCAL.machine}`], { allowFail: false })).stdout.trim()
+  await git(repo.dir, ["reset", "-q", "--soft", c], { allowFail: false })
+}
+
 // Undo a half-done merge. If git can't, the repo needs a person: stop.
 async function abortMerge(repo) {
   if (mergeInProgress(repo)) await git(repo.dir, ["merge", "--abort"])
@@ -217,9 +257,12 @@ export async function syncRepo(repo) {
     for (let attempt = 1; attempt <= 3; attempt++) {
       const f = await git(repo.dir, ["fetch", "-q", "--no-recurse-submodules", "origin"], { timeout: 30_000 })
       if (f.code !== 0) return { repo: repo.name, status: "offline", detail: f.stderr.trim().split("\n").pop() }
-      const remoteRef = `refs/remotes/origin/${BRANCH}`
       const haveHead = await hasRef(repo.dir, "HEAD")
-      if (await hasRef(repo.dir, remoteRef)) {
+      // Check and merge one exact commit, so what was checked is what lands.
+      const r = await git(repo.dir, ["rev-parse", "-q", "--verify", `refs/remotes/origin/${BRANCH}^{commit}`])
+      const remoteRef = r.code === 0 ? r.stdout.trim() : null
+      if (remoteRef) {
+        if (haveHead && (await git(repo.dir, ["merge-base", "HEAD", remoteRef])).code !== 0) await startFresh(repo)
         if (!haveHead || !(await isAncestor(repo.dir, remoteRef, "HEAD"))) {
           const problems = await checkIncoming(repo, remoteRef)
           if (problems.length) {
@@ -230,6 +273,7 @@ export async function syncRepo(repo) {
         }
         if (await isAncestor(repo.dir, "HEAD", remoteRef)) return { repo: repo.name, status: "up-to-date" }
       } else if (!haveHead) return { repo: repo.name, status: "up-to-date" } // nothing anywhere yet
+      else await startFresh(repo) // first push to an empty remote
       const p = await git(repo.dir, ["push", "-q", "--no-verify", "origin", `HEAD:${BRANCH}`], { timeout: 60_000 })
       if (p.code === 0) return { repo: repo.name, status: "pushed" }
       if (!/rejected|non-fast-forward|fetch first/i.test(p.stderr)) return { repo: repo.name, status: "offline", detail: p.stderr.trim().split("\n").pop() }
@@ -250,10 +294,10 @@ async function mergeIncoming(repo, remoteRef, haveHead) {
   }
   // Files the merge can touch: the diff from the merge base, or (two histories that never met)
   // everything the remote has.
-  const d = haveHead ? await git(repo.dir, ["diff", "--name-only", `HEAD...${remoteRef}`]) : { code: 1 }
+  const d = haveHead ? await git(repo.dir, ["diff", "-z", "--name-only", `HEAD...${remoteRef}`]) : { code: 1 }
   const changed = d.code === 0
-    ? d.stdout.split("\n").filter(Boolean)
-    : (await git(repo.dir, ["ls-tree", "-r", "--name-only", "--full-tree", remoteRef])).stdout.split("\n").filter(Boolean)
+    ? d.stdout.split("\0").filter(Boolean)
+    : (await git(repo.dir, ["ls-tree", "-r", "-z", "--name-only", "--full-tree", remoteRef])).stdout.split("\0").filter(Boolean)
   // A workstream folder that only exists on the other side has no local writer to hold off.
   const locks = changed.filter((f) => RECORD_FILES.includes(path.basename(f))).map((f) => path.join(repo.dir, f)).filter((f) => existsSync(path.dirname(f)))
   return withRecordLocks(locks, async () => {

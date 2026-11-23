@@ -3,10 +3,7 @@
 import { promises as fs, realpathSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
-import matter from "gray-matter"
 
-// gray-matter caches parses by text and shares the data object; mutating it poisons
-// later reads of identical text. Passing options disables the cache.
 import { codexDir } from "./paths.mjs"
 import { loadGeminiSession, partText, wsToolName, isGeminiInjected } from "./gemini.mjs"
 import * as store from "./store.mjs"
@@ -240,7 +237,7 @@ async function findAdoptableManualLog(wsId, started, ended, logCalls = []) {
 
 async function writeLogFile(file, data, body) {
   for (const k of Object.keys(data)) if (data[k] == null || (Array.isArray(data[k]) && !data[k].length)) delete data[k]
-  await store.writeFileAtomic(file, matter.stringify(`\n${body.trim()}\n`, data))
+  await store.writeFileAtomic(file, store.stringifyMd(`\n${body.trim()}\n`, data))
 }
 
 export async function captureSession(args) {
@@ -423,7 +420,9 @@ async function syncWarning() {
     const st = JSON.parse(await fs.readFile(path.join(store.ROOT, ".sync-state.json"), "utf-8"))
     const bad = (st.results || []).filter((r) => ["conflict", "error", "refused"].includes(r.status))
     if (!bad.length) return ""
-    return `[ws] Sync between machines has stopped since ${String(st.at).slice(0, 16).replace("T", " ")} (${bad.map((r) => `${r.repo}: ${r.detail || r.status}`).join("; ")}). Local changes are safe; tell the user, who can run \`ws sync\` to see what to fix.`
+    // Details can quote file names the remote chose: printable characters only, kept short.
+    const clean = (s) => String(s).replace(/[^\x20-\x7e]/g, "?").slice(0, 200)
+    return `[ws] Sync between machines has stopped since ${clean(st.at).slice(0, 16).replace("T", " ")} (${bad.map((r) => `${clean(r.repo)}: ${clean(r.detail || r.status)}`).join("; ")}). Local changes are safe; tell the user, who can run \`ws sync\` to see what to fix.`
   } catch { return "" }
 }
 

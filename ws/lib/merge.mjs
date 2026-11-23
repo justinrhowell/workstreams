@@ -13,8 +13,7 @@
 // - the same new ID on both sides with different text: theirs keeps the ID (it was published
 //   first) and ours is renumbered to the next free one. The renumbering is reported.
 // Free text (notes, extra lines) is merged as a union, ours first.
-import matter from "gray-matter"
-import { parseOpen, renderOpen, parseDecisions, renderDecisions, normalizeEol, oneLine, parseMd } from "./store.mjs"
+import { parseOpen, renderOpen, parseDecisions, renderDecisions, normalizeEol, oneLine, parseMd, stringifyMd } from "./store.mjs"
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const numOf = (id, sep) => Number(String(id).split(sep).pop())
@@ -66,6 +65,13 @@ function mergeRecord(b, o, t, { stateKeys, stronger, textKey = "text" }) {
 // Records added on both sides under the same ID with different content: theirs keeps the
 // ID, ours moves to a fresh one. Returns the merged list in a stable order and the renames.
 function mergeRecords(base, ours, theirs, { idOf, renumber, merge }) {
+  // ws never writes two records with one ID; a hand edit that did is left for a person rather
+  // than merged (a map by ID would silently keep only one of them).
+  for (const [name, list] of [["base", base], ["ours", ours], ["theirs", theirs]]) {
+    const ids = list.map(idOf)
+    const dup = ids.find((id, i) => ids.indexOf(id) !== i)
+    if (dup) throw new Error(`${dup} appears twice (${name}); fix it by hand`)
+  }
   const bm = new Map(base.map((r) => [idOf(r), r]))
   const om = new Map(ours.map((r) => [idOf(r), r]))
   const tm = new Map(theirs.map((r) => [idOf(r), r]))
@@ -165,7 +171,7 @@ export function mergeWorkstreamText(baseText, oursText, theirsText) {
     if (ob === bb) body = tb
     else if (tb !== bb) body = `${ob}\n\n<!-- ws sync: also edited on another machine -->\n${tb}`
   }
-  return { text: matter.stringify(`\n${body ? body + "\n" : ""}`, data), renames: [] }
+  return { text: stringifyMd(`\n${body ? body + "\n" : ""}`, data), renames: [] }
 }
 
 // Which merge applies to a repo-relative path; null means "not a ws record file".

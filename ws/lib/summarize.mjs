@@ -7,10 +7,7 @@ import path from "node:path"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
-import matter from "gray-matter"
 
-// gray-matter caches parses by text and shares the data object; mutating it poisons
-// later reads of identical text. Passing options disables the cache.
 import * as store from "./store.mjs"
 const { parseMd } = store
 import { loadConfig } from "./config.mjs"
@@ -577,7 +574,7 @@ export async function processJob(job, cfg) {
   // draft that is being replaced.
   const publish = () => store.withLock(file, async () => {
     if (job.file && job.token && !(await sameJob(job))) return false
-    await store.writeFileAtomic(file, matter.stringify(`\n${proposal.summary}\n`, data))
+    await store.writeFileAtomic(file, store.stringifyMd(`\n${proposal.summary}\n`, data))
     return true
   })
   const published = job.file ? await store.withLock(job.file, publish) : await publish()
@@ -801,7 +798,7 @@ export async function acceptProposal(p, opts = {}) {
       await fn()
       done.add(key)
       cur.data.applied_steps = [...done]
-      await store.writeFileAtomic(claimed, matter.stringify(`\n${cur.content.trim()}\n`, cur.data))
+      await store.writeFileAtomic(claimed, store.stringifyMd(`\n${cur.content.trim()}\n`, cur.data))
     }
     try {
       // Apply what the claimed file says (identity checked above), not a possibly stale listing.
@@ -876,7 +873,7 @@ async function applyProposal(p, { close = true, add = true, summary = true, unve
         if (p.model) data.summary_model = String(p.model) // YAML can't hold undefined
         if (applied.closed.length) data.closed = applied.closed
         if (applied.added.length) data.added = applied.added
-        await store.writeFileAtomic(p.log, matter.stringify(`\n${p.summary}\n`, data))
+        await store.writeFileAtomic(p.log, store.stringifyMd(`\n${p.summary}\n`, data))
       })
     })
   }

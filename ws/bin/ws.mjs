@@ -797,7 +797,11 @@ async function cmdSync() {
   const bad = results.filter((r) => sync.BAD.includes(r.status))
   if (bad.length || results.some((r) => r.renames?.length)) {
     const line = `${new Date().toISOString()} ${results.map((r) => `${r.repo}:${r.status}${r.detail ? ` (${r.detail})` : ""}${r.renames ? ` renamed ${r.renames.join("; ")}` : ""}`).join(" ")}\n`
-    try { await fs.appendFile(path.join(store.ROOT, "sync-problems.log"), line) } catch {}
+    try {
+      const log = path.join(store.ROOT, "sync-problems.log")
+      try { if ((await fs.lstat(log)).isSymbolicLink()) await fs.rm(log) } catch {}
+      await fs.appendFile(log, line.replace(/[^\x20-\x7e\n]/g, "?"))
+    } catch {}
   }
   if (opt.quiet) { if (bad.length) process.exitCode = 1; return }
   if (opt.json) return console.log(JSON.stringify(results, null, 2))

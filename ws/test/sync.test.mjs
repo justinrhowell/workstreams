@@ -343,11 +343,19 @@ async function pushRaw(remote, name, files) {
   for (const [rel, v] of Object.entries(files)) {
     const f = path.join(dir, rel)
     await fs.mkdir(path.dirname(f), { recursive: true })
+    if (v && typeof v === "object" && "index" in v) continue // added below, straight into the index
     await fs.rm(f, { force: true })
     if (typeof v === "string") await fs.writeFile(f, v)
     else await fs.symlink(v.link, f)
   }
   git(dir, "add", "-A", "-f")
+  // { index: text }: a path written into git's index directly, as a case-sensitive machine
+  // would have it, whatever this machine's disk does with case.
+  for (const [rel, v] of Object.entries(files)) {
+    if (!(v && typeof v === "object" && "index" in v)) continue
+    const blob = spawnSync("git", ["hash-object", "-w", "--stdin"], { cwd: dir, input: v.index, encoding: "utf-8" }).stdout.trim()
+    assert.equal(git(dir, "update-index", "--add", "--cacheinfo", `100644,${blob},${rel}`).code, 0)
+  }
   assert.equal(git(dir, "commit", "-qm", "raw").code, 0)
   assert.equal(git(dir, "push", "-q", "origin", "HEAD:main").code, 0)
 }
@@ -367,6 +375,12 @@ test("front matter must be YAML: code in it is never run, locally or from a merg
   const hook = spawnSync(process.execPath, [BIN, "hook", "claude", "start"], { input: JSON.stringify({ session_id: "s", cwd: proj }), encoding: "utf-8", env: { ...process.env, ...gitEnv, WS_ROOT: a.root, WS_NO_SPAWN: "1" } })
   assert.equal(hook.status, 0)
   assert.ok(!existsSync(mark), "front-matter code ran")
+  // A body that looks like code front matter is kept as text when the file is written back.
+  await pushRaw(remote, "yaml2", { "ws/y/WORKSTREAM.md": `---\nid: y\ntitle: Y\nstatus: active\n---\n${evil}` })
+  a.ws("sync")
+  a.ws("set", "y", "status=waiting")
+  a.ws("item", "add", "y", "after")
+  assert.ok(!existsSync(mark), "code in a body ran on write")
 })
 
 test("incoming symlinks, machine-local files and un-ignore rules are refused before merging", async () => {
@@ -378,6 +392,11 @@ test("incoming symlinks, machine-local files and un-ignore rules are refused bef
     ["config", { "config.json": JSON.stringify({ llm: { url: "http://example.invalid/v1" } }) }, /settings/],
     ["unignore", { ".gitignore": "!config.json\n" }, /un-ignores/],
     ["attrs", { "ws/x/.gitattributes": "* merge=union\n" }, /git metadata/],
+    ["case-config", { "Config.JSON": { index: "{}" } }, /settings/],
+    ["case-queue", { "Queue/job.json": { index: "{}" } }, /queue/],
+    ["case-attrs", { ".GitAttributes": { index: "* merge=union\n" } }, /case variant/],
+    ["collide", { "ws/l/Open.md": { index: "x\n" } }, /differ only in case/],
+    ["big-attrs", { ".gitattributes": "# pad\n".repeat(20000) + "* merge=union\n" }, /too large|sets/],
   ]) {
     const remote = await bare(`refuse-${name}`)
     const a = await machine(`ref-${name}`, { remote })
@@ -442,4 +461,24 @@ test("a workstream set at the home folder (or above) never claims sessions", () 
     { id: "root", cwd: "/", status: "active" },
   ]
   assert.equal(matchWorkstream(list, path.join(os.homedir(), "anything"), undefined).link, null)
+})
+
+test("a data folder's own earlier history never goes to the remote", async () => {
+  const remote = await bare("fresh")
+  const a = await machine("fresh-a", { remote })
+  git(a.root, "init", "-q", "-b", "main")
+  await fs.writeFile(path.join(a.root, "config.json.old"), "old settings\n")
+  git(a.root, "add", "-A"); git(a.root, "commit", "-qm", "an old commit")
+  await fs.rm(path.join(a.root, "config.json.old"))
+  git(a.root, "add", "-A"); git(a.root, "commit", "-qm", "removed it")
+  a.okWs("new", "f", "--title", "F", "--cwd", proj)
+  a.okWs("sync")
+  const log = git(tmp, "--git-dir", remote, "log", "--format=%s", "main").out.trim().split("\n")
+  assert.equal(log.length, 1, log.join(" | "))
+  assert.equal(git(tmp, "--git-dir", remote, "log", "--all", "--format=%H", "--", "config.json.old").out.trim(), "")
+  assert.match(git(a.root, "for-each-ref", "refs/ws/").out, /pre-sync/, "the old history is kept locally")
+})
+
+test("merge: records with a duplicated ID are left for a person", () => {
+  assert.throws(() => mergeOpenText(open(2, ["- [ ] T-1 a"]), open(2, ["- [ ] T-1 a", "- [ ] T-1 b"]), open(2, ["- [ ] T-1 a"])), /appears twice/)
 })

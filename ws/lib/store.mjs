@@ -18,6 +18,11 @@ export function parseMd(text) {
   if (/^---/.test(first) && first.trim() !== "---") throw new Error(`front matter must start with a bare "---" (found "${first.slice(0, 20)}")`)
   return matter(text, { language: "yaml", engines: { js: noCode, javascript: noCode, coffee: noCode, coffeescript: noCode, cson: noCode } })
 }
+// gray-matter's stringify re-parses a string body with its default (code-running) engines;
+// handing it an already-parsed file object skips that. Every front-matter write goes here.
+export function stringifyMd(content, data) {
+  return matter.stringify({ content: String(content ?? ""), data: {} }, data, { language: "yaml" })
+}
 // Path rewrites from config.json (set once LOCAL is read below; WS_ROOT itself is never mapped).
 let localPaths = []
 
@@ -291,7 +296,7 @@ export async function createWorkstream(id, fields) {
   await fs.mkdir(path.join(dir, "log"), { recursive: true })
   const data = { id, status: "active", tool: "claude", created: new Date().toISOString(), sources: [], ...fields }
   for (const k of Object.keys(data)) if (data[k] === undefined) delete data[k]
-  await writeFileAtomic(path.join(dir, "WORKSTREAM.md"), matter.stringify("\n", data))
+  await writeFileAtomic(path.join(dir, "WORKSTREAM.md"), stringifyMd("\n", data))
   await writeOpen(id, { next: 1, items: [] }, data.title || id)
   return getWorkstream(id)
 }
@@ -316,7 +321,7 @@ export async function updateWorkstream(id, patch) {
       for (const k of ["title", "waiting_on", "group"]) if (typeof patch[k] === "string") patch = { ...patch, [k]: oneLine(patch[k]) }
       Object.assign(data, patch)
     }
-    await writeFileAtomic(file, matter.stringify(content, data))
+    await writeFileAtomic(file, stringifyMd(content, data))
     return result
   })
 }
@@ -900,7 +905,7 @@ export async function appendLog(id, entry) {
   const data = { ended: now.toISOString(), source: "manual", ...meta }
   if (LOCAL.enabled && !data.host) data.host = LOCAL.machine // which machine, once several share the data
   for (const k of Object.keys(data)) if (data[k] === undefined || data[k] === null) delete data[k]
-  const text = matter.stringify(`\n${summary.trim()}\n`, data)
+  const text = stringifyMd(`\n${summary.trim()}\n`, data)
   // Two notes in the same second share a name; the loser of the exclusive create takes
   // the next free suffix instead of failing.
   for (let n = 1; ; n++) {

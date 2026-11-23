@@ -4,8 +4,6 @@ import { promises as fs, existsSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
-// gray-matter caches parses by text and shares the data object; mutating it poisons
-// later reads of identical text. Passing options disables the cache.
 import { getWorkstream, getProcedure, readOpen, readDecisions, fillVars, variablesIn, tildify, expand, LOCAL, parseMd } from "./store.mjs"
 import { listProposals } from "./summarize.mjs"
 
